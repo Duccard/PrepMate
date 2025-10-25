@@ -1,0 +1,7 @@
+.venv/
+
+.env
+
+.streamlit/
+
+__pycache__/
