@@ -1,6 +1,9 @@
-# 🎤 Interview Practice App
+# PrepMate, The Interview Preparation App
 
 A simple **Streamlit** web app that helps users prepare for job interviews using **OpenAI’s GPT models**.
+
+## 🌐 Live Demo
+https://prepmate-vehotkn5mymmd3kbyrnppd.streamlit.app/
 
 ## 🚀 Features
 - Generates tailored interview questions based on:
