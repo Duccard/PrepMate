@@ -11,7 +11,7 @@ st.set_page_config(
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    st.error("❌ No OpenAI API key found in .env / Secrets. Set OPENAI_API_KEY.")
+    st.error("No OpenAI API key found in .env / Secrets. Set OPENAI_API_KEY.")
     st.stop()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -84,7 +84,7 @@ with st.sidebar:
     st.caption("🔒 Basic misuse guard is active.")
 
 # ---------- Header ----------
-st.title("sPrepMate — Interview Practice")
+st.title("PrepMate")
 st.caption(
     "Generate tailored questions, get STAR feedback, track history, and tune model behavior."
 )
