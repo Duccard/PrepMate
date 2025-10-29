@@ -1,21 +1,24 @@
 import os
+import json, io, datetime
 from typing import List, Dict
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
-import json, io, datetime
 
 
 # ---------- Bootstrapping ----------
-st.set_page_config(
-    page_title="PrepMate • Interview Practice", page_icon="🎤", layout="wide"
-)
+st.set_page_config(page_title="PrepMate", layout="wide")
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 if not OPENAI_API_KEY:
-    st.error("No OpenAI API key found in .env / Secrets. Set OPENAI_API_KEY.")
+    st.error(
+        "❌ No OpenAI API key found in .env or Streamlit Secrets (OPENAI_API_KEY)."
+    )
     st.stop()
+
 client = OpenAI(api_key=OPENAI_API_KEY)
+
 
 # ---------- Session ----------
 if "history" not in st.session_state:
@@ -23,11 +26,18 @@ if "history" not in st.session_state:
 if "last_questions" not in st.session_state:
     st.session_state.last_questions = ""
 
+
 # ---------- Helpers ----------
 difficulty_tips = {
     "Easy": "Ask straightforward, entry-level questions testing basic understanding.",
     "Medium": "Ask mid-level questions that involve reasoning and real examples.",
     "Hard": "Ask complex, open-ended or scenario-based questions testing depth and creativity.",
+}
+
+persona_guides = {
+    "Neutral": "Professional, concise, one question at a time.",
+    "Friendly coach": "Supportive tone, encourages reflection, gives hints.",
+    "Strict bar-raiser": "Terse, challenging, asks for evidence and metrics.",
 }
 
 
@@ -41,6 +51,7 @@ def estimate_cost(chars: int, model: str = "gpt-4o-mini") -> float:
     tokens = max(1, chars // 4)
     rates = {
         "gpt-4o-mini": 0.15 / 1_000_000,
+        "gpt-4o": 5.00 / 1_000_000,
         "gpt-4.1": 5.00 / 1_000_000,
         "gpt-4.1-mini": 0.30 / 1_000_000,
     }
@@ -73,6 +84,11 @@ with st.sidebar:
     difficulty = st.select_slider(
         "Difficulty", ["Easy", "Medium", "Hard"], value="Medium"
     )
+    persona = st.selectbox(
+        "Interviewer persona",
+        ["Neutral", "Friendly coach", "Strict bar-raiser"],
+        index=0,
+    )
 
     st.markdown("### ⚙️ Model")
     model = st.selectbox(
@@ -81,28 +97,16 @@ with st.sidebar:
     temperature = st.slider("Temperature", 0.0, 1.5, 0.7, 0.1)
     top_p = st.slider("Top-p sampling", 0.0, 1.0, 1.0, 0.05)
     max_tokens = st.slider("Max output tokens", 100, 2000, 600, 50)
-
     USE_MOCK = st.toggle("🧪 Mock Mode (no API calls)", False)
     st.caption("🔒 Basic misuse guard is active.")
-
-    persona = st.selectbox(
-        "Interviewer persona",
-        ["Neutral", "Friendly coach", "Strict bar-raiser"],
-        index=0,
-    )
-
-    persona_guides = {
-        "Neutral": "Professional, concise, one question at a time.",
-        "Friendly coach": "Supportive tone, encourages reflection, gives hints.",
-        "Strict bar-raiser": "Terse, challenging, asks for evidence and metrics.",
-    }
 
 
 # ---------- Header ----------
 st.title("PrepMate")
 st.caption(
-    "Generate tailored questions, get STAR feedback, track history, and tune model behavior."
+    "Your personal AI interview practice companion — generate questions, get STAR feedback, and track progress."
 )
+
 
 # ---------- Inputs ----------
 topic = st.text_area(
@@ -112,7 +116,6 @@ topic = st.text_area(
 )
 
 with st.expander("📄 Optional context"):
-    # Note: accepting only text files for simplicity
     jd_file = st.file_uploader(
         "Upload Job Description (.txt or .md)", type=["txt", "md"]
     )
@@ -126,7 +129,6 @@ def _normalize(s: str) -> str:
 
 job_desc = ""
 if jd_file is not None:
-    # simple 200 KB guard
     if getattr(jd_file, "size", 0) > 200_000:
         st.warning("JD file is too large (>200 KB). Please paste key parts instead.")
     else:
@@ -134,21 +136,17 @@ if jd_file is not None:
         try:
             job_desc = raw.decode("utf-8")
         except UnicodeDecodeError:
-            # fallback for Windows-encoded files
             job_desc = raw.decode("cp1252", errors="ignore")
         job_desc = job_desc[:10000]
 
-# prefer uploaded JD; otherwise manual
 if not job_desc:
     job_desc = job_desc_manual
 
-# normalize inputs before validation
 topic = _normalize(topic)
 job_desc = _normalize(job_desc)
 resume = _normalize(resume)
 
 
-# simple validation
 def too_long(s: str, limit=5000) -> bool:
     return len(s) > limit
 
@@ -158,17 +156,23 @@ if too_long(topic) or too_long(job_desc) or too_long(resume):
     st.stop()
 
 
-# ---------- Safe ask wrapper (supports Mock Mode) ----------
+# ---------- Buttons ----------
+colL, colR = st.columns([2, 1])
+with colL:
+    gen_btn = st.button("🧠 Generate Questions", use_container_width=True)
+with colR:
+    st.write("")
+
+
+# ---------- Safe ask (supports mock mode) ----------
 def safe_ask(prompt: str) -> str:
     if USE_MOCK:
         return (
             "Technical:\n"
-            "1) Explain the difference between INNER and LEFT JOIN with an example.\n"
+            "1) Explain the difference between INNER and LEFT JOIN.\n"
             "2) When would you use ROW_NUMBER() vs RANK()?\n"
-            "3) Design a rate-limited API; outline components.\n"
             "Behavioral:\n"
-            "4) Tell me about a time you handled conflicting priorities.\n"
-            "5) Give an example of turning feedback into improvement."
+            "3) Tell me about a time you handled conflicting priorities."
         )
     return ask_openai(
         prompt, model=model, temperature=temperature, top_p=top_p, max_tokens=max_tokens
@@ -182,11 +186,12 @@ if gen_btn:
     else:
         guideline = difficulty_tips[difficulty]
         prompt = f"""
-You are an experienced interviewer. Generate tailored interview questions.
+You are an experienced interviewer.
 
 Role: {role}
 Difficulty: {difficulty}
 Guideline: {guideline}
+Interviewer persona guideline: {persona_guides[persona]}
 Focus topic(s): {topic or 'General interview readiness'}
 Job Description: {job_desc or 'N/A'}
 Candidate Resume Bullets: {resume or 'N/A'}
@@ -208,19 +213,18 @@ Requirements:
                 )
                 try:
                     st.toast("✅ Questions ready!", icon="✅")
-                except Exception:
+                except:
                     pass
             except Exception as e:
                 st.error(f"OpenAI error: {e}")
-                st.info("Tip: turn on 🧪 Mock Mode if you’re out of quota.")
+                st.info("Tip: Turn on Mock Mode if you're out of quota.")
 
 st.divider()
 
+
 # ---------- Critique ----------
 st.subheader("🧩 Critique My Answer")
-user_answer = st.text_area(
-    "Paste your answer (to any question) for feedback:", height=140
-)
+user_answer = st.text_area("Paste your answer for feedback:", height=140)
 crit_btn = st.button("💬 Get Feedback")
 
 if crit_btn:
@@ -248,7 +252,6 @@ Candidate answer:
         with st.spinner("Scoring your answer…"):
             try:
                 raw = safe_ask(critique_prompt)
-                # Try to locate JSON (in case model wraps it in text)
                 json_str = raw.strip()
                 start = json_str.find("{")
                 end = json_str.rfind("}")
@@ -283,22 +286,21 @@ Candidate answer:
                     st.toast("📝 Structured feedback ready!", icon="📝")
                 except:
                     pass
-
             except Exception as e:
-                st.error(f"Parsing error. Showing raw output:")
+                st.error("Parsing error — showing raw output:")
                 st.write(raw)
 
 
-# ---------- History ----------
-# --- Export & Reset ---
+# ---------- History / Export / Reset ----------
 st.divider()
 c1, c2 = st.columns([1, 1])
 with c1:
     if st.button("🧹 Clear History"):
         st.session_state.history.clear()
         st.experimental_rerun()
+
 with c2:
-    # Build markdown export
+
     def build_md(hist):
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         parts = [f"# PrepMate Session Export ({now})\n"]
@@ -314,3 +316,5 @@ with c2:
         file_name="prepmate_session.md",
         mime="text/markdown",
     )
+
+st.caption("© 2025 PrepMate — Built with Streamlit & OpenAI API")
