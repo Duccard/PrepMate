@@ -36,11 +36,9 @@ def misuse_guard(*texts: str) -> bool:
 
 
 def estimate_cost(chars: int, model: str = "gpt-4o-mini") -> float:
-    # very rough: ~4 chars/token; example rates (adjust if you want exact)
     tokens = max(1, chars // 4)
     rates = {
-        "gpt-4o-mini": 0.15 / 1_000_000,  # $ per 1M tokens (input-ish)
-        "gpt-4o": 5.00 / 1_000_000,
+        "gpt-4o-mini": 0.15 / 1_000_000,
         "gpt-4.1": 5.00 / 1_000_000,
         "gpt-4.1-mini": 0.30 / 1_000_000,
     }
@@ -86,7 +84,7 @@ with st.sidebar:
     st.caption("🔒 Basic misuse guard is active.")
 
 # ---------- Header ----------
-st.title("🎤 PrepMate — Interview Practice")
+st.title("sPrepMate — Interview Practice")
 st.caption(
     "Generate tailored questions, get STAR feedback, track history, and tune model behavior."
 )
@@ -106,7 +104,7 @@ colL, colR = st.columns([2, 1])
 with colL:
     gen_btn = st.button("🧠 Generate Questions", use_container_width=True)
 with colR:
-    st.write("")  # spacing
+    st.write("")
 
 
 # ---------- Safe ask wrapper (supports Mock Mode) ----------
@@ -212,7 +210,3 @@ with st.expander("🕓 Session history"):
         for item in st.session_state.history:
             tag = "🧠 Questions" if item["type"] == "questions" else "🧩 Critique"
             st.markdown(f"**{tag}**\n\n{item['text']}\n\n---")
-
-st.caption(
-    "✨ Hour 4: difficulty scaling, mock mode, advanced tuning, and UX polish are live."
-)
