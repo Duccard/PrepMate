@@ -3,6 +3,8 @@ from typing import List, Dict
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
+import json, io, datetime
+
 
 # ---------- Bootstrapping ----------
 st.set_page_config(
@@ -83,6 +85,19 @@ with st.sidebar:
     USE_MOCK = st.toggle("🧪 Mock Mode (no API calls)", False)
     st.caption("🔒 Basic misuse guard is active.")
 
+    persona = st.selectbox(
+        "Interviewer persona",
+        ["Neutral", "Friendly coach", "Strict bar-raiser"],
+        index=0,
+    )
+
+    persona_guides = {
+        "Neutral": "Professional, concise, one question at a time.",
+        "Friendly coach": "Supportive tone, encourages reflection, gives hints.",
+        "Strict bar-raiser": "Terse, challenging, asks for evidence and metrics.",
+    }
+
+
 # ---------- Header ----------
 st.title("PrepMate")
 st.caption(
@@ -97,14 +112,50 @@ topic = st.text_area(
 )
 
 with st.expander("📄 Optional context"):
-    job_desc = st.text_area("Job description (paste text)", height=140)
+    # Note: accepting only text files for simplicity
+    jd_file = st.file_uploader(
+        "Upload Job Description (.txt or .md)", type=["txt", "md"]
+    )
+    job_desc_manual = st.text_area("Or paste job description", height=140)
     resume = st.text_area("Your resume bullets (paste text)", height=120)
 
-colL, colR = st.columns([2, 1])
-with colL:
-    gen_btn = st.button("🧠 Generate Questions", use_container_width=True)
-with colR:
-    st.write("")
+
+def _normalize(s: str) -> str:
+    return (s or "").replace("\r\n", "\n").strip()
+
+
+job_desc = ""
+if jd_file is not None:
+    # simple 200 KB guard
+    if getattr(jd_file, "size", 0) > 200_000:
+        st.warning("JD file is too large (>200 KB). Please paste key parts instead.")
+    else:
+        raw = jd_file.read()
+        try:
+            job_desc = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # fallback for Windows-encoded files
+            job_desc = raw.decode("cp1252", errors="ignore")
+        job_desc = job_desc[:10000]
+
+# prefer uploaded JD; otherwise manual
+if not job_desc:
+    job_desc = job_desc_manual
+
+# normalize inputs before validation
+topic = _normalize(topic)
+job_desc = _normalize(job_desc)
+resume = _normalize(resume)
+
+
+# simple validation
+def too_long(s: str, limit=5000) -> bool:
+    return len(s) > limit
+
+
+if too_long(topic) or too_long(job_desc) or too_long(resume):
+    st.error("Inputs are too long (limit ~5000 chars per field). Trim and try again.")
+    st.stop()
 
 
 # ---------- Safe ask wrapper (supports Mock Mode) ----------
@@ -179,34 +230,87 @@ if crit_btn:
         st.error("This content looks unsafe or out of scope.")
     else:
         critique_prompt = f"""
-You are an expert interviewer. Evaluate the candidate's answer using the STAR framework.
-Rate on 1–5 for Clarity, Depth, and Structure.
-Then provide a 2–3 sentence strengths summary and ONE concrete improvement tip.
-Keep it under ~150 words.
+You are an expert interviewer.
+
+Interviewer persona guideline: {persona_guides[persona]}
+Evaluate the candidate's answer using STAR.
+
+Return ONLY a compact JSON object with this schema:
+{{
+  "scores": {{"Clarity": 1-5, "Depth": 1-5, "Structure": 1-5}},
+  "overall_comment": "one paragraph, <= 80 words",
+  "improvement_tip": "one concrete tip, one sentence"
+}}
 
 Candidate answer:
 {user_answer}
 """
         with st.spinner("Scoring your answer…"):
             try:
-                critique = safe_ask(critique_prompt)
-                st.write(critique)
-                st.session_state.history.append({"type": "critique", "text": critique})
+                raw = safe_ask(critique_prompt)
+                # Try to locate JSON (in case model wraps it in text)
+                json_str = raw.strip()
+                start = json_str.find("{")
+                end = json_str.rfind("}")
+                if start != -1 and end != -1:
+                    json_str = json_str[start : end + 1]
+                data = json.loads(json_str)
+
+                scores = data.get("scores", {})
+                clarity = int(scores.get("Clarity", 0))
+                depth = int(scores.get("Depth", 0))
+                structure = int(scores.get("Structure", 0))
+                avg = (
+                    round((clarity + depth + structure) / 3, 2)
+                    if any([clarity, depth, structure])
+                    else 0
+                )
+
+                st.subheader("Scores")
+                st.write(
+                    f"- **Clarity:** {clarity}/5\n- **Depth:** {depth}/5\n- **Structure:** {structure}/5\n- **Overall:** **{avg}/5**"
+                )
+                st.subheader("Comment")
+                st.write(data.get("overall_comment", ""))
+                st.subheader("Improvement Tip")
+                st.write("• " + data.get("improvement_tip", ""))
+
+                st.session_state.history.append({"type": "critique", "text": raw})
                 st.caption(
                     f"💰 Estimated prompt cost (rough): ${estimate_cost(len(critique_prompt), model):.5f}"
                 )
                 try:
-                    st.toast("📝 Feedback ready!", icon="📝")
-                except Exception:
+                    st.toast("📝 Structured feedback ready!", icon="📝")
+                except:
                     pass
+
             except Exception as e:
-                st.error(f"OpenAI error: {e}")
+                st.error(f"Parsing error. Showing raw output:")
+                st.write(raw)
+
 
 # ---------- History ----------
-with st.expander("🕓 Session history"):
-    if not st.session_state.history:
-        st.caption("No history yet — generate questions or request a critique.")
-    else:
-        for item in st.session_state.history:
-            tag = "🧠 Questions" if item["type"] == "questions" else "🧩 Critique"
-            st.markdown(f"**{tag}**\n\n{item['text']}\n\n---")
+# --- Export & Reset ---
+st.divider()
+c1, c2 = st.columns([1, 1])
+with c1:
+    if st.button("🧹 Clear History"):
+        st.session_state.history.clear()
+        st.experimental_rerun()
+with c2:
+    # Build markdown export
+    def build_md(hist):
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        parts = [f"# PrepMate Session Export ({now})\n"]
+        for item in hist:
+            tag = "Questions" if item["type"] == "questions" else "Critique"
+            parts.append(f"## {tag}\n\n{item['text']}\n")
+        return "\n---\n".join(parts)
+
+    md = build_md(st.session_state.history)
+    st.download_button(
+        "⬇️ Download Session (Markdown)",
+        data=md.encode("utf-8"),
+        file_name="prepmate_session.md",
+        mime="text/markdown",
+    )
