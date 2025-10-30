@@ -1,6 +1,9 @@
 import os
-import json, datetime
+import re
+import json
+import datetime
 from typing import List, Dict
+
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -57,7 +60,7 @@ def misuse_guard(*texts: str) -> bool:
 
 
 def estimate_cost(chars: int, model: str = "gpt-4o-mini") -> float:
-    tokens = max(1, chars // 4)
+    tokens = max(1, chars // 4)  # very rough char->token
     rates = {
         "gpt-4o-mini": 0.15 / 1_000_000,
         "gpt-4o": 5.00 / 1_000_000,
@@ -209,7 +212,7 @@ def safe_ask(prompt: str) -> str:
 
 
 # =========================
-# Generate 10 merged questions
+# Generate 10 merged questions (stored, not printed twice)
 # =========================
 if gen_btn:
     if misuse_guard(topic, job_desc, resume):
@@ -263,10 +266,6 @@ Example format:
                     [f"{i+1}. {q}" for i, q in enumerate(q10)]
                 )
 
-                st.subheader("📋 Questions (1–10)")
-                for i, q in enumerate(q10, 1):
-                    st.markdown(f"**{i}.** {q}")
-
                 st.caption(
                     f"💰 Estimated prompt cost (rough): ${estimate_cost(len(prompt), model):.5f}"
                 )
@@ -279,10 +278,10 @@ Example format:
                 st.info("Tip: Turn on Mock Mode if you're out of quota.")
 
 # =========================
-# Critique: 10 answers with verdicts
+# Answer & Feedback
 # =========================
 st.divider()
-st.subheader("🧩 Critique My Answers (for the 10 questions above)")
+st.subheader("🧩 Answer & Get Feedback (10 questions)")
 
 if not st.session_state.q10:
     st.info("Generate questions first, then answer below.")
@@ -355,22 +354,32 @@ Answers:
             with st.spinner("Grading your 10 answers…"):
                 raw = safe_ask(grading_prompt)
 
-            # Robust JSON extraction
+            # ---------- Robust JSON extraction & normalization ----------
             js = raw.strip()
-            s, e = js.find("{"), js.rfind("}")
-            if s != -1 and e != -1:
-                js = js[s : e + 1]
+
+            # 1) Cut to the innermost JSON-looking block
+            match = re.search(r"\{[\s\S]*\}", js)
+            if match:
+                js = match.group(0)
+
+            # 2) Normalize quotes / trailing commas
+            js = js.replace("'", '"')
+            js = re.sub(r",(\s*[}\]])", r"\1", js)
+
+            # 3) Parse
             try:
                 data = json.loads(js)
                 items = data.get("items", [])
-            except Exception:
+            except json.JSONDecodeError as e:
+                st.warning(f"JSON parse failed ({e}) — showing raw output:")
+                st.code(js)
                 items = []
 
-            if len(items) != 10:
+            if not items or len(items) < 10:
                 st.warning(
-                    "Could not parse 10 grading results reliably. Showing raw output:"
+                    "Could not parse 10 results reliably. Showing raw output below:"
                 )
-                st.write(raw)
+                st.code(raw[:2000])
             else:
                 ICON = {"good": "✅", "in-between": "⚠️", "bad": "❌"}
                 COLOR = {"good": "green", "in-between": "orange", "bad": "red"}
@@ -448,7 +457,7 @@ with c2:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         parts = [f"# PrepMate Session Export ({now})\n"]
         for item in hist:
-            tag = "Questions/Answers" if item["type"] != "critique" else "Grading"
+            tag = "Grading" if item["type"] == "critique" else "Questions/Answers"
             parts.append(f"## {tag}\n\n{item['text']}\n")
         return "\n---\n".join(parts)
 
