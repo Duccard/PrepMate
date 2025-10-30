@@ -77,18 +77,34 @@ def ask_openai(
 # ---------- Sidebar ----------
 with st.sidebar:
     st.header("🎛️ Settings")
-    role = st.selectbox(
-        "Role / domain",
-        ["General", "Data Science", "Backend", "Frontend", "Product", "HR"],
-    )
+
     difficulty = st.select_slider(
         "Difficulty", ["Easy", "Medium", "Hard"], value="Medium"
     )
+
     persona = st.selectbox(
         "Interviewer persona",
-        ["Neutral", "Friendly coach", "Strict bar-raiser"],
+        [
+            "Neutral",
+            "Friendly coach",
+            "Strict bar-raiser",
+            "Motivational mentor",
+            "Calm psychologist",
+            "Playful mock interviewer",
+            "Corporate recruiter",
+        ],
         index=0,
     )
+
+    persona_guides = {
+        "Neutral": "Professional, concise, and unbiased.",
+        "Friendly coach": "Supportive tone, encourages reflection, offers gentle hints.",
+        "Strict bar-raiser": "Challenging, expects precise answers and metrics.",
+        "Motivational mentor": "Inspiring tone, focuses on growth and encouragement.",
+        "Calm psychologist": "Analytical and empathetic, probes for self-awareness.",
+        "Playful mock interviewer": "Light tone, humorous but insightful feedback.",
+        "Corporate recruiter": "Evaluates professionalism, fit, and clarity in communication.",
+    }
 
     st.markdown("### ⚙️ Model")
     model = st.selectbox(
@@ -188,7 +204,6 @@ if gen_btn:
         prompt = f"""
 You are an experienced interviewer.
 
-Role: {role}
 Difficulty: {difficulty}
 Guideline: {guideline}
 Interviewer persona guideline: {persona_guides[persona]}
@@ -199,7 +214,7 @@ Candidate Resume Bullets: {resume or 'N/A'}
 Requirements:
 - Return 8 questions total.
 - Split: 5 technical, 3 behavioral.
-- Keep questions concise and realistic for the role & difficulty.
+- Keep questions concise and realistic for the difficulty level.
 """
         with st.spinner("Generating questions…"):
             try:
