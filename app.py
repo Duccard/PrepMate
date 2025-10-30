@@ -307,6 +307,10 @@ else:
                 "Some answers look unsafe or out of scope. Please revise and resubmit."
             )
         else:
+            # Sanitize answers to avoid raw double quotes breaking JSON in model echoes
+            questions = [q for q, _ in answers]
+            safe_answers = [(a or "").replace('"', "'") for _, a in answers]
+
             grading_prompt = f"""
 You are an expert interviewer and strict grader.
 
@@ -329,7 +333,12 @@ For EACH question, return a JSON object with:
     "Overall": 1-5
   }}
 
-Return ONLY JSON in this structure:
+Return ONLY JSON in this structure (no prose, no code fences).
+Rules:
+- Use valid JSON with double quotes for keys and strings.
+- Escape any double quote inside strings as \\".
+- Do not use smart quotes.
+
 {{
   "items": [
     {{
@@ -346,10 +355,10 @@ Return ONLY JSON in this structure:
 }}
 
 Questions:
-{json.dumps([q for q,_ in answers], ensure_ascii=False)}
+{json.dumps(questions, ensure_ascii=False)}
 
 Answers:
-{json.dumps([a for _,a in answers], ensure_ascii=False)}
+{json.dumps(safe_answers, ensure_ascii=False)}
 """
             with st.spinner("Grading your 10 answers…"):
                 raw = safe_ask(grading_prompt)
@@ -362,8 +371,7 @@ Answers:
             if match:
                 js = match.group(0)
 
-            # 2) Normalize quotes / trailing commas
-            js = js.replace("'", '"')
+            # 2) Clean trailing commas (keep apostrophes intact!)
             js = re.sub(r",(\s*[}\]])", r"\1", js)
 
             # 3) Parse
