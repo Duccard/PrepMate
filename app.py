@@ -86,6 +86,24 @@ def ask_openai(
         return str(resp)
 
 
+def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
+    """
+    Strict JSON helper for grading. Uses low temperature and OpenAI JSON mode.
+    """
+    resp = client.responses.create(
+        model=model,
+        input=prompt,
+        temperature=0.2,  # deterministic for grading
+        top_p=1,
+        max_output_tokens=max_tokens,
+        response_format={"type": "json_object"},
+    )
+    try:
+        return resp.output_text
+    except Exception:
+        return str(resp)
+
+
 # =========================
 # Sidebar
 # =========================
@@ -360,28 +378,46 @@ Questions:
 Answers:
 {json.dumps(safe_answers, ensure_ascii=False)}
 """
+
             with st.spinner("Grading your 10 answers…"):
-                raw = safe_ask(grading_prompt)
+                # First try: strict JSON mode
+                raw = ask_openai_json(
+                    grading_prompt, model=model, max_tokens=max_tokens
+                )
 
-            # ---------- Robust JSON extraction & normalization ----------
-            js = raw.strip()
+            def _parse_items(raw_text: str):
+                js = raw_text.strip()
 
-            # 1) Cut to the innermost JSON-looking block
-            match = re.search(r"\{[\s\S]*\}", js)
-            if match:
-                js = match.group(0)
+                # Keep only the innermost JSON block if wrappers exist
+                match = re.search(r"\{[\s\S]*\}", js)
+                if match:
+                    js = match.group(0)
 
-            # 2) Clean trailing commas (keep apostrophes intact!)
-            js = re.sub(r",(\s*[}\]])", r"\1", js)
+                # Clean trailing commas, but DO NOT touch apostrophes
+                js = re.sub(r",(\s*[}\]])", r"\1", js)
 
-            # 3) Parse
-            try:
-                data = json.loads(js)
-                items = data.get("items", [])
-            except json.JSONDecodeError as e:
-                st.warning(f"JSON parse failed ({e}) — showing raw output:")
-                st.code(js)
-                items = []
+                try:
+                    data = json.loads(js)
+                    return data.get("items", []), js
+                except json.JSONDecodeError:
+                    return [], js
+
+            items, cleaned = _parse_items(raw)
+
+            # Retry once if we didn't get 10 valid items
+            if len(items) < 10:
+                retry_prompt = (
+                    grading_prompt
+                    + """
+
+REMINDER:
+- Return ONLY a JSON object with key "items" that contains EXACTLY 10 entries.
+- No prose, no code fences.
+- Each item must include: index, question, answer, verdict, points, comment, scores.
+"""
+                )
+                raw = ask_openai_json(retry_prompt, model=model, max_tokens=max_tokens)
+                items, cleaned = _parse_items(raw)
 
             if not items or len(items) < 10:
                 st.warning(
