@@ -95,16 +95,15 @@ def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
 
     def _supports_json_mode(m: str) -> bool:
         m = (m or "").lower()
-        # Adjust this allowlist as you confirm support in your account
-        return "gpt-4.1" in m  # True for gpt-4.1 and gpt-4.1-mini
+        return "gpt-4.1" in m  # gpt-4.1 and gpt-4.1-mini
 
-    # 1) Try strict JSON mode if supported
+    # Try JSON mode first if supported
     if _supports_json_mode(model):
         try:
             resp = client.responses.create(
                 model=model,
                 input=prompt,
-                temperature=0.2,  # deterministic for grading
+                temperature=0.2,
                 top_p=1,
                 max_output_tokens=max_tokens,
                 response_format={"type": "json_object"},
@@ -114,10 +113,9 @@ def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
             except Exception:
                 return str(resp)
         except Exception:
-            # fall through to normal mode
-            pass
+            pass  # fall through
 
-    # 2) Fallback: normal call (still low temp). Prompt already enforces JSON.
+    # Fallback normal call (still low temp)
     try:
         resp = client.responses.create(
             model=model,
@@ -131,7 +129,6 @@ def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
         except Exception:
             return str(resp)
     except Exception as e:
-        # Final safety: return the error string so the UI can surface it
         return f"__FALLBACK_ERROR__: {e}"
 
 
@@ -152,6 +149,8 @@ with st.sidebar:
     temperature = st.slider("Temperature", 0.0, 1.5, 0.7, 0.1)
     top_p = st.slider("Top-p sampling", 0.0, 1.0, 1.0, 0.05)
     max_tokens = st.slider("Max output tokens", 100, 2000, 800, 50)
+    # More headroom for grading JSON:
+    grade_tokens = max(1200, int(max_tokens * 1.2))
     USE_MOCK = st.toggle("🧪 Mock Mode (no API calls)", False)
     st.caption("🔒 Basic misuse guard is active.")
 
@@ -356,7 +355,6 @@ else:
                 "Some answers look unsafe or out of scope. Please revise and resubmit."
             )
         else:
-            # Sanitize answers to avoid raw double quotes breaking JSON in model echoes
             questions = [q for q, _ in answers]
             safe_answers = [(a or "").replace('"', "'") for _, a in answers]
 
@@ -367,27 +365,23 @@ Interviewer persona guideline: {persona_guides[persona]}
 Topic focus: {topic or 'General readiness'}
 
 You will receive 10 questions and the candidate's 10 answers (aligned by index).
-For EACH question, return a JSON object with:
 
-- "index": 1..10
-- "question": the question text
-- "answer": the candidate's answer (shortened <= 25 words)
-- "verdict": one of ["good", "in-between", "bad"]
-- "points": 1 if good, 0.5 if in-between, 0 if bad
-- "comment": one concise sentence explaining what was good or what was missing
-- "scores": {{
-    "Clarity": 1-5,
-    "Depth": 1-5,
-    "Structure": 1-5,
-    "Overall": 1-5
-  }}
-
-Return ONLY JSON in this structure (no prose, no code fences).
-Rules:
-- Use valid JSON with double quotes for keys and strings.
-- Escape any double quote inside strings as \\".
+Rules per item:
+- If the candidate answer is empty/blank, set:
+  "answer": "", "verdict": "bad", "points": 0,
+  "comment": "No answer provided.",
+  "scores": {{"Clarity":1,"Depth":1,"Structure":1,"Overall":1}}
+- Keep "answer" <= 12 words (shortened from user answer).
+- Keep "comment" <= 12 words, one sentence, specific.
+- Use ONLY these verdicts: "good", "in-between", "bad".
+- Points: good=1, in-between=0.5, bad=0.
+- Scores are integers 1..5.
+- Return EXACTLY 10 items, index 1..10.
+- Output ONLY valid JSON (no prose, no code fences).
+- Use double quotes for strings; escape internal quotes as \\".
 - Do not use smart quotes.
 
+Return JSON with this schema:
 {{
   "items": [
     {{
@@ -413,20 +407,17 @@ Answers:
             with st.spinner("Grading your 10 answers…"):
                 # First try: strict JSON mode
                 raw = ask_openai_json(
-                    grading_prompt, model=model, max_tokens=max_tokens
+                    grading_prompt, model=model, max_tokens=grade_tokens
                 )
 
             def _parse_items(raw_text: str):
                 js = raw_text.strip()
-
-                # Keep only the innermost JSON block if wrappers exist
+                # Keep only innermost JSON block if wrappers exist
                 match = re.search(r"\{[\s\S]*\}", js)
                 if match:
                     js = match.group(0)
-
                 # Clean trailing commas, but DO NOT touch apostrophes
                 js = re.sub(r",(\s*[}\]])", r"\1", js)
-
                 try:
                     data = json.loads(js)
                     return data.get("items", []), js
@@ -435,7 +426,7 @@ Answers:
 
             items, cleaned = _parse_items(raw)
 
-            # Retry once if we didn't get 10 valid items
+            # Retry once if fewer than 10 items
             if len(items) < 10:
                 retry_prompt = (
                     grading_prompt
@@ -447,15 +438,20 @@ REMINDER:
 - Each item must include: index, question, answer, verdict, points, comment, scores.
 """
                 )
-                raw = ask_openai_json(retry_prompt, model=model, max_tokens=max_tokens)
+                raw = ask_openai_json(
+                    retry_prompt, model=model, max_tokens=grade_tokens
+                )
                 items, cleaned = _parse_items(raw)
 
-            if not items or len(items) < 10:
-                st.warning(
-                    "Could not parse 10 results reliably. Showing raw output below:"
-                )
+            if not items:
+                st.warning("Could not parse results. Showing raw output below:")
                 st.code(raw[:2000])
             else:
+                if len(items) < 10:
+                    st.warning(
+                        f"Received only {len(items)}/10 graded items. Showing what we have."
+                    )
+
                 ICON = {"good": "✅", "in-between": "⚠️", "bad": "❌"}
                 COLOR = {"good": "green", "in-between": "orange", "bad": "red"}
 
