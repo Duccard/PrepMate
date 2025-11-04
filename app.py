@@ -88,20 +88,51 @@ def ask_openai(
 
 def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
     """
-    Strict JSON helper for grading. Uses low temperature and OpenAI JSON mode.
+    Strict JSON helper for grading.
+    - Use JSON mode only on models that support it (gpt-4.1 family is a safe bet).
+    - Otherwise/fallback: low-temp normal response; rely on our JSON-only prompt + parser.
     """
-    resp = client.responses.create(
-        model=model,
-        input=prompt,
-        temperature=0.2,  # deterministic for grading
-        top_p=1,
-        max_output_tokens=max_tokens,
-        response_format={"type": "json_object"},
-    )
+
+    def _supports_json_mode(m: str) -> bool:
+        m = (m or "").lower()
+        # Adjust this allowlist as you confirm support in your account
+        return "gpt-4.1" in m  # True for gpt-4.1 and gpt-4.1-mini
+
+    # 1) Try strict JSON mode if supported
+    if _supports_json_mode(model):
+        try:
+            resp = client.responses.create(
+                model=model,
+                input=prompt,
+                temperature=0.2,  # deterministic for grading
+                top_p=1,
+                max_output_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+            try:
+                return resp.output_text
+            except Exception:
+                return str(resp)
+        except Exception:
+            # fall through to normal mode
+            pass
+
+    # 2) Fallback: normal call (still low temp). Prompt already enforces JSON.
     try:
-        return resp.output_text
-    except Exception:
-        return str(resp)
+        resp = client.responses.create(
+            model=model,
+            input=prompt,
+            temperature=0.2,
+            top_p=1,
+            max_output_tokens=max_tokens,
+        )
+        try:
+            return resp.output_text
+        except Exception:
+            return str(resp)
+    except Exception as e:
+        # Final safety: return the error string so the UI can surface it
+        return f"__FALLBACK_ERROR__: {e}"
 
 
 # =========================
