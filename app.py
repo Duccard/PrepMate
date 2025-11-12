@@ -60,7 +60,7 @@ def misuse_guard(*texts: str) -> bool:
 
 
 def estimate_cost(chars: int, model: str = "gpt-4o-mini") -> float:
-    tokens = max(1, chars // 4)  # very rough char->token
+    tokens = max(1, chars // 4)  # rough char->token
     rates = {
         "gpt-4o-mini": 0.15 / 1_000_000,
         "gpt-4o": 5.00 / 1_000_000,
@@ -89,15 +89,14 @@ def ask_openai(
 def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
     """
     Strict JSON helper for grading.
-    - Use JSON mode only on models that support it (gpt-4.1 family is a safe bet).
-    - Otherwise/fallback: low-temp normal response; rely on our JSON-only prompt + parser.
+    - Try JSON mode on models that support it (gpt-4.1 family).
+    - Otherwise fallback to low-temp normal response.
     """
 
     def _supports_json_mode(m: str) -> bool:
         m = (m or "").lower()
         return "gpt-4.1" in m  # gpt-4.1 and gpt-4.1-mini
 
-    # Try JSON mode first if supported
     if _supports_json_mode(model):
         try:
             resp = client.responses.create(
@@ -115,7 +114,7 @@ def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
         except Exception:
             pass  # fall through
 
-    # Fallback normal call (still low temp)
+    # Fallback normal call
     try:
         resp = client.responses.create(
             model=model,
@@ -149,8 +148,7 @@ with st.sidebar:
     temperature = st.slider("Temperature", 0.0, 1.5, 0.7, 0.1)
     top_p = st.slider("Top-p sampling", 0.0, 1.0, 1.0, 0.05)
     max_tokens = st.slider("Max output tokens", 100, 2000, 800, 50)
-    # More headroom for grading JSON:
-    grade_tokens = max(1200, int(max_tokens * 1.2))
+    grade_tokens = max(1200, int(max_tokens * 1.2))  # more headroom for JSON grading
     USE_MOCK = st.toggle("🧪 Mock Mode (no API calls)", False)
     st.caption("🔒 Basic misuse guard is active.")
 
@@ -244,6 +242,7 @@ def safe_ask(prompt: str) -> str:
                         "verdict": "in-between",
                         "points": 0.5,
                         "comment": "Decent, but missing specifics.",
+                        "tip": "Add concrete data and outcomes.",
                         "scores": {
                             "Clarity": 3,
                             "Depth": 2,
@@ -356,6 +355,7 @@ else:
             )
         else:
             questions = [q for q, _ in answers]
+            # Replace just the raw double-quotes to avoid model echo-breaking JSON
             safe_answers = [(a or "").replace('"', "'") for _, a in answers]
 
             grading_prompt = f"""
@@ -366,15 +366,29 @@ Topic focus: {topic or 'General readiness'}
 
 You will receive 10 questions and the candidate's 10 answers (aligned by index).
 
+Scoring rubric (use independently per dimension; avoid uniform scoring):
+- Clarity: How clear and easy to follow the answer is.
+- Depth: Technical/insight depth and use of evidence/examples.
+- Structure: Logical flow and completeness (STAR for behavioral).
+- Overall: Holistic impression (relevance + correctness + impact).
+
+Guidance:
+- 5 = exceptional, 4 = solid, 3 = acceptable, 2 = weak, 1 = poor.
+- Only truly excellent answers should reach 5/5.
+- At least some variation across answers is expected when quality differs.
+
 Rules per item:
 - If the candidate answer is empty/blank, set:
   "answer": "", "verdict": "bad", "points": 0,
   "comment": "No answer provided.",
-  "scores": {{"Clarity":1,"Depth":1,"Structure":1,"Overall":1}}
+  "scores": {{"Clarity":1,"Depth":1,"Structure":1,"Overall":1}},
+  "tip": "Add a concrete, specific answer."
 - Keep "answer" <= 12 words (shortened from user answer).
 - Keep "comment" <= 12 words, one sentence, specific.
+- Include a short "tip" for how to improve (<= 12 words).
+  If Overall == 5, tip must be: "Excellent answer — keep it up."
 - Use ONLY these verdicts: "good", "in-between", "bad".
-- Points: good=1, in-between=0.5, bad=0.
+- Points: good=1, in-between=0.5, bad=0.   # (Client will compute final points by weighted score.)
 - Scores are integers 1..5.
 - Return EXACTLY 10 items, index 1..10.
 - Output ONLY valid JSON (no prose, no code fences).
@@ -391,6 +405,7 @@ Return JSON with this schema:
       "verdict": "good|in-between|bad",
       "points": 1|0.5|0,
       "comment": "...",
+      "tip": "...",
       "scores": {{"Clarity": 1, "Depth": 1, "Structure": 1, "Overall": 1}}
     }},
     ... 10 items total ...
@@ -405,7 +420,6 @@ Answers:
 """
 
             with st.spinner("Grading your 10 answers…"):
-                # First try: strict JSON mode
                 raw = ask_openai_json(
                     grading_prompt, model=model, max_tokens=grade_tokens
                 )
@@ -416,7 +430,7 @@ Answers:
                 match = re.search(r"\{[\s\S]*\}", js)
                 if match:
                     js = match.group(0)
-                # Clean trailing commas, but DO NOT touch apostrophes
+                # Remove trailing commas (but do not touch apostrophes)
                 js = re.sub(r",(\s*[}\]])", r"\1", js)
                 try:
                     data = json.loads(js)
@@ -435,7 +449,7 @@ Answers:
 REMINDER:
 - Return ONLY a JSON object with key "items" that contains EXACTLY 10 entries.
 - No prose, no code fences.
-- Each item must include: index, question, answer, verdict, points, comment, scores.
+- Each item must include: index, question, answer, verdict, points, comment, tip, scores.
 """
                 )
                 raw = ask_openai_json(
@@ -462,23 +476,28 @@ REMINDER:
                 for it in items:
                     idx = it.get("index", "?")
                     verdict = (it.get("verdict") or "").lower()
-                    points = float(it.get("points", 0))
                     comment = it.get("comment", "")
+                    tip = it.get("tip", "")
                     sc = it.get("scores", {}) or {}
+
                     clarity = float(sc.get("Clarity", 0))
                     depth = float(sc.get("Depth", 0))
                     structure = float(sc.get("Structure", 0))
                     overall = float(sc.get("Overall", 0))
-                    weighted = round((clarity + depth + structure + 2 * overall) / 5, 2)
 
-                    total_points += points
+                    # Weighted score (Overall counts double)
+                    weighted = round((clarity + depth + structure + 2 * overall) / 5, 2)
+                    # Continuous points from weighted score (0..1)
+                    cont_points = max(0.0, min(1.0, round(weighted / 5.0, 2)))
+
+                    total_points += cont_points
                     weighted_scores.append(weighted)
 
                     icon = ICON.get(verdict, "❔")
                     color = COLOR.get(verdict, "gray")
 
                     st.markdown(
-                        f"<span style='color:{color}; font-weight:700'>{icon} Q{idx} — {verdict.upper()} · +{points} pts</span>",
+                        f"<span style='color:{color}; font-weight:700'>{icon} Q{idx} — {verdict.upper()} · +{cont_points:.2f} pts</span>",
                         unsafe_allow_html=True,
                     )
                     st.markdown(f"**Question:** {it.get('question','')}")
@@ -489,6 +508,8 @@ REMINDER:
                         f"Structure: {int(structure)}/5 · Overall: {int(overall)}/5 "
                         f"(weighted: **{weighted}/5**)"
                     )
+                    if tip:
+                        st.markdown(f"**Tip:** {tip}")
                     st.markdown("---")
 
                 avg_weighted = (
@@ -497,15 +518,16 @@ REMINDER:
                     else 0.0
                 )
                 st.success(
-                    f"🏁 **Round summary:** {total_points}/10 points · "
+                    f"🏁 **Round summary:** {total_points:.2f}/10.00 points · "
                     f"Average weighted score: **{avg_weighted}/5** (Overall counted double)"
                 )
 
                 # Log to history
                 summary_block = "\n".join(
                     [
-                        f"Q{it.get('index')}: verdict={it.get('verdict')}, pts={it.get('points')}, "
-                        f"scores={it.get('scores')}, comment={it.get('comment')}"
+                        f"Q{it.get('index')}: verdict={it.get('verdict')}, "
+                        f"weighted={round(( (it.get('scores',{}) or {}).get('Clarity',0) + (it.get('scores',{}) or {}).get('Depth',0) + (it.get('scores',{}) or {}).get('Structure',0) + 2*(it.get('scores',{}) or {}).get('Overall',0) )/5, 2)}, "
+                        f"tip={it.get('tip','')}, comment={it.get('comment','')}"
                         for it in items
                     ]
                 )
