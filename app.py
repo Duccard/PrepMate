@@ -2,7 +2,7 @@ import os
 import re
 import json
 import datetime
-from typing import List, Dict
+from typing import List, Dict, Any
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -14,7 +14,6 @@ from openai import OpenAI
 st.set_page_config(page_title="PrepMate", layout="wide")
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
 if not OPENAI_API_KEY:
     st.error(
         "❌ No OpenAI API key found in .env or Streamlit Secrets (OPENAI_API_KEY)."
@@ -24,24 +23,8 @@ if not OPENAI_API_KEY:
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
-# Session
-# =========================
-if "history" not in st.session_state:
-    st.session_state.history: List[Dict] = []
-if "q10" not in st.session_state:
-    st.session_state.q10: List[str] = []
-if "last_questions" not in st.session_state:
-    st.session_state.last_questions = ""
-
-# =========================
 # Helpers
 # =========================
-difficulty_tips = {
-    "Easy": "Ask straightforward, entry-level questions testing basic understanding.",
-    "Medium": "Ask mid-level questions that involve reasoning and real examples.",
-    "Hard": "Ask complex, open-ended or scenario-based questions testing depth and creativity.",
-}
-
 persona_guides = {
     "Neutral": "Professional, concise, and unbiased.",
     "Friendly coach": "Supportive tone, encourages reflection, offers gentle hints.",
@@ -50,6 +33,12 @@ persona_guides = {
     "Calm psychologist": "Analytical and empathetic, probes for self-awareness.",
     "Playful mock interviewer": "Light tone, humorous but insightful feedback.",
     "Corporate recruiter": "Evaluates professionalism, fit, and clarity in communication.",
+}
+
+difficulty_tips = {
+    "Easy": "Ask straightforward, entry-level questions testing basic understanding.",
+    "Medium": "Ask mid-level questions that involve reasoning and real examples.",
+    "Hard": "Ask complex, open-ended or scenario-based questions testing depth and creativity.",
 }
 
 
@@ -70,15 +59,20 @@ def estimate_cost(chars: int, model: str = "gpt-4o-mini") -> float:
     return tokens * rates.get(model, 0.15 / 1_000_000)
 
 
-def ask_openai(
+def _supports_json_mode(m: str) -> bool:
+    m = (m or "").lower()
+    return "gpt-4.1" in m  # JSON mode supported for gpt-4.1 / gpt-4.1-mini
+
+
+def ask_openai_text(
     prompt: str, *, model: str, temperature: float, top_p: float, max_tokens: int
 ) -> str:
     resp = client.responses.create(
         model=model,
+        input=prompt,
         temperature=temperature,
         top_p=top_p,
         max_output_tokens=max_tokens,
-        input=prompt,
     )
     try:
         return resp.output_text
@@ -87,16 +81,7 @@ def ask_openai(
 
 
 def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
-    """
-    Strict JSON helper for grading.
-    - Try JSON mode on models that support it (gpt-4.1 family).
-    - Otherwise fallback to low-temp normal response.
-    """
-
-    def _supports_json_mode(m: str) -> bool:
-        m = (m or "").lower()
-        return "gpt-4.1" in m  # gpt-4.1 and gpt-4.1-mini
-
+    # Try strict JSON mode if available
     if _supports_json_mode(model):
         try:
             resp = client.responses.create(
@@ -112,9 +97,8 @@ def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
             except Exception:
                 return str(resp)
         except Exception:
-            pass  # fall through
-
-    # Fallback normal call
+            pass
+    # Fallback to normal call (still low temp)
     try:
         resp = client.responses.create(
             model=model,
@@ -131,25 +115,80 @@ def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
         return f"__FALLBACK_ERROR__: {e}"
 
 
+def clean_and_parse_json(raw_text: str) -> Any:
+    """Extract innermost JSON and parse. Also remove trailing commas."""
+    js = (raw_text or "").strip()
+    m = re.search(r"\{[\s\S]*\}", js)
+    if m:
+        js = m.group(0)
+    # Remove trailing commas BEFORE closing } or ]
+    js = re.sub(r",(\s*[}\]])", r"\1", js)
+    # Don't alter apostrophes; the prompt enforces double quotes
+    return json.loads(js)
+
+
+# =========================
+# Session (single-question flow)
+# =========================
+def ensure_state():
+    s = st.session_state
+    s.setdefault("history", [])  # past exports
+    s.setdefault("topic", "")
+    s.setdefault("difficulty", "Medium")
+    s.setdefault("persona", "Neutral")
+    s.setdefault("model", "gpt-4o-mini")
+    s.setdefault("temperature", 0.7)
+    s.setdefault("top_p", 1.0)
+    s.setdefault("max_tokens", 800)
+    s.setdefault("grade_tokens", 1200)
+    s.setdefault("USE_MOCK", False)
+
+    # round state
+    s.setdefault("questions", [])  # list[str], len==10 when generated
+    s.setdefault("cur_idx", 0)  # 0..9
+    s.setdefault("answers", [""] * 10)  # user answers
+    s.setdefault("results", [None] * 10)  # per-Q grading dicts
+    s.setdefault("total_points", 0.0)  # sum of per-Q points
+    s.setdefault("done", False)  # finished 10/10
+
+
+ensure_state()
+
 # =========================
 # Sidebar
 # =========================
 with st.sidebar:
     st.header("🎛️ Settings")
-    difficulty = st.select_slider(
-        "Difficulty", ["Easy", "Medium", "Hard"], value="Medium"
+    st.session_state.difficulty = st.select_slider(
+        "Difficulty", ["Easy", "Medium", "Hard"], value=st.session_state.difficulty
     )
-    persona = st.selectbox("Interviewer persona", list(persona_guides.keys()), index=0)
+    st.session_state.persona = st.selectbox(
+        "Interviewer persona",
+        list(persona_guides.keys()),
+        index=list(persona_guides.keys()).index(st.session_state.persona),
+    )
 
     st.markdown("### ⚙️ Model")
-    model = st.selectbox(
-        "Model", ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini"], index=0
+    st.session_state.model = st.selectbox(
+        "Model",
+        ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini"],
+        index=["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini"].index(
+            st.session_state.model
+        ),
     )
-    temperature = st.slider("Temperature", 0.0, 1.5, 0.7, 0.1)
-    top_p = st.slider("Top-p sampling", 0.0, 1.0, 1.0, 0.05)
-    max_tokens = st.slider("Max output tokens", 100, 2000, 800, 50)
-    grade_tokens = max(1200, int(max_tokens * 1.2))  # more headroom for JSON grading
-    USE_MOCK = st.toggle("🧪 Mock Mode (no API calls)", False)
+    st.session_state.temperature = st.slider(
+        "Temperature", 0.0, 1.5, float(st.session_state.temperature), 0.1
+    )
+    st.session_state.top_p = st.slider(
+        "Top-p sampling", 0.0, 1.0, float(st.session_state.top_p), 0.05
+    )
+    st.session_state.max_tokens = st.slider(
+        "Max output tokens", 100, 2000, int(st.session_state.max_tokens), 50
+    )
+    st.session_state.grade_tokens = max(1200, int(st.session_state.max_tokens * 1.2))
+    st.session_state.USE_MOCK = st.toggle(
+        "🧪 Mock Mode (no API calls)", st.session_state.USE_MOCK
+    )
     st.caption("🔒 Basic misuse guard is active.")
 
 # =========================
@@ -157,27 +196,27 @@ with st.sidebar:
 # =========================
 st.title("PrepMate")
 st.caption(
-    "Your AI interview practice companion — 10 questions per round, per-question verdicts, and weighted scoring."
+    "Single-question flow: answer → instant feedback → next. 10 questions total, then a graded summary."
 )
 
 # =========================
-# Inputs
+# Inputs (topic + optional context)
 # =========================
 topic = st.text_area(
     "What do you want to practice?",
+    value=st.session_state.topic,
     placeholder="e.g., SQL joins, system design, behavioral STAR…",
     height=90,
 )
-
 with st.expander("📄 Optional context"):
     jd_file = st.file_uploader(
         "Upload Job Description (.txt or .md)", type=["txt", "md"]
     )
-    job_desc_manual = st.text_area("Or paste job description", height=140)
-    resume = st.text_area("Your resume bullets (paste text)", height=120)
+    job_desc_manual = st.text_area("Or paste job description", height=140, value="")
+    resume = st.text_area("Your resume bullets (paste text)", height=120, value="")
 
 
-def _normalize(s: str) -> str:
+def _norm(s: str) -> str:
     return (s or "").replace("\r\n", "\n").strip()
 
 
@@ -192,93 +231,46 @@ if jd_file is not None:
         except UnicodeDecodeError:
             job_desc = raw.decode("cp1252", errors="ignore")
         job_desc = job_desc[:10000]
-
 if not job_desc:
     job_desc = job_desc_manual
 
-topic = _normalize(topic)
-job_desc = _normalize(job_desc)
-resume = _normalize(resume)
+topic = _norm(topic)
+job_desc = _norm(job_desc)
+resume = _norm(resume)
 
 
 def too_long(s: str, limit=5000) -> bool:
     return len(s) > limit
 
 
-if too_long(topic) or too_long(job_desc) or too_long(resume):
+if any([too_long(topic), too_long(job_desc), too_long(resume)]):
     st.error("Inputs are too long (limit ~5000 chars per field). Trim and try again.")
     st.stop()
 
-# =========================
-# Buttons
-# =========================
-colL, colR = st.columns([2, 1])
-with colL:
-    gen_btn = st.button("🧠 Generate 10 Questions", use_container_width=True)
-with colR:
-    st.write("")
-
 
 # =========================
-# Mock-safe ask
+# Generation (10 questions upfront)
 # =========================
-def safe_ask(prompt: str) -> str:
-    if USE_MOCK:
-        if "Return EXACTLY 10 questions" in prompt:
-            return "\n".join(
-                [
-                    f"{i}. Mock question {i} about {topic or 'the role'}"
-                    for i in range(1, 11)
-                ]
-            )
-        if '"items"' in prompt and "verdict" in prompt:
-            items = []
-            for i in range(1, 11):
-                items.append(
-                    {
-                        "index": i,
-                        "question": f"Mock question {i}",
-                        "answer": "Mock answer",
-                        "verdict": "in-between",
-                        "points": 0.5,
-                        "comment": "Decent, but missing specifics.",
-                        "tip": "Add concrete data and outcomes.",
-                        "scores": {
-                            "Clarity": 3,
-                            "Depth": 2,
-                            "Structure": 3,
-                            "Overall": 3,
-                        },
-                    }
-                )
-            return json.dumps({"items": items}, ensure_ascii=False)
-        return "Mock output."
-    return ask_openai(
-        prompt, model=model, temperature=temperature, top_p=top_p, max_tokens=max_tokens
-    )
+def safe_generate_questions() -> List[str]:
+    if st.session_state.USE_MOCK:
+        return [
+            f"{i}. Mock question {i} about {topic or 'the role'}" for i in range(1, 11)
+        ]
 
-
-# =========================
-# Generate 10 merged questions (stored, not printed twice)
-# =========================
-if gen_btn:
-    if misuse_guard(topic, job_desc, resume):
-        st.error("This looks unsafe or out of scope. Please rephrase.")
-    else:
-        guideline = difficulty_tips[difficulty]
-        prompt = f"""
+    guideline = difficulty_tips[st.session_state.difficulty]
+    prompt = f"""
 You are an experienced interviewer.
 
-Difficulty: {difficulty}
+Difficulty: {st.session_state.difficulty}
 Guideline: {guideline}
-Interviewer persona guideline: {persona_guides[persona]}
+Interviewer persona guideline: {persona_guides[st.session_state.persona]}
 Focus topic(s): {topic or 'General interview readiness'}
 Job Description: {job_desc or 'N/A'}
 Candidate Resume Bullets: {resume or 'N/A'}
 
 Task:
-Create a single set of interview questions that mixes technical and behavioral aspects
-relevant to the topic. Return EXACTLY 10 questions, numbered 1 to 10. One per line.
+Create a single set of interview questions that mixes technical and behavioral aspects relevant to the topic.
+Return EXACTLY 10 questions, numbered 1 to 10. One per line.
 Keep each question under 25 words and realistic.
 
 Example format:
@@ -287,279 +279,326 @@ Example format:
 ...
 10. ...
 """
-        with st.spinner("Generating questions…"):
-            try:
-                out = safe_ask(prompt)
-
-                # Parse 10 numbered lines
-                lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-                q10 = []
-                for ln in lines:
-                    # Accept "1. ..." / "1) ..." / "1 - ..."
-                    head = ln.split(maxsplit=1)[0]
-                    if head.rstrip(".)").isdigit():
-                        q = (
-                            ln.split(".", 1)[-1]
-                            if "." in ln
-                            else ln.split(")", 1)[-1] if ")" in ln else ln[len(head) :]
-                        )
-                        q10.append(q.strip(" -–•\t"))
-                q10 = q10[:10]
-                while len(q10) < 10:
-                    q10.append("(placeholder)")
-
-                st.session_state.q10 = q10
-                st.session_state.last_questions = "\n".join(
-                    [f"{i+1}. {q}" for i, q in enumerate(q10)]
-                )
-
-                st.caption(
-                    f"💰 Estimated prompt cost (rough): ${estimate_cost(len(prompt), model):.5f}"
-                )
-                try:
-                    st.toast("✅ 10 questions ready!", icon="✅")
-                except:
-                    pass
-            except Exception as e:
-                st.error(f"OpenAI error: {e}")
-                st.info("Tip: Turn on Mock Mode if you're out of quota.")
-
-# =========================
-# Answer & Feedback
-# =========================
-st.divider()
-st.subheader("🧩 Answer & Get Feedback (10 questions)")
-
-if not st.session_state.q10:
-    st.info("Generate questions first, then answer below.")
-else:
-    q10 = st.session_state.q10
-
-    with st.form(key="answers_form_10"):
-        answers = []
-        for i, q in enumerate(q10, 1):
-            st.markdown(f"**{i}. {q}**")
-            a = st.text_area(
-                f"Your answer {i}",
-                key=f"ans10_{i}",
-                height=80,
-                placeholder="Type your answer here…",
+    out = ask_openai_text(
+        prompt,
+        model=st.session_state.model,
+        temperature=st.session_state.temperature,
+        top_p=st.session_state.top_p,
+        max_tokens=st.session_state.max_tokens,
+    )
+    # Parse 10 numbered lines
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    q10 = []
+    for ln in lines:
+        head = ln.split(maxsplit=1)[0]
+        if head.rstrip(".)").isdigit():
+            q = (
+                ln.split(".", 1)[-1]
+                if "." in ln
+                else (ln.split(")", 1)[-1] if ")" in ln else ln[len(head) :])
             )
-            answers.append((q, (a or "").strip()))
-        crit_btn = st.form_submit_button("💬 Submit Answers for Grading")
+            q10.append(q.strip(" -–•\t"))
+    q10 = q10[:10]
+    while len(q10) < 10:
+        q10.append("(placeholder)")
+    return q10
 
-    if crit_btn:
-        if any(misuse_guard(a) for _, a in answers):
-            st.error(
-                "Some answers look unsafe or out of scope. Please revise and resubmit."
-            )
+
+# Controls
+c1, c2, c3 = st.columns([1, 1, 2])
+with c1:
+    if st.button("🧠 Start / Regenerate 10 Questions", use_container_width=True):
+        if misuse_guard(topic, job_desc, resume):
+            st.error("This looks unsafe or out of scope. Please rephrase.")
         else:
-            questions = [q for q, _ in answers]
-            # Replace just the raw double-quotes to avoid model echo-breaking JSON
-            safe_answers = [(a or "").replace('"', "'") for _, a in answers]
+            st.session_state.topic = topic
+            st.session_state.questions = safe_generate_questions()
+            st.session_state.cur_idx = 0
+            st.session_state.answers = [""] * 10
+            st.session_state.results = [None] * 10
+            st.session_state.total_points = 0.0
+            st.session_state.done = False
+            try:
+                st.toast("✅ 10 questions ready!", icon="✅")
+            except:
+                pass
+with c2:
+    if st.button("🔁 Reset Round", use_container_width=True):
+        st.session_state.questions = []
+        st.session_state.cur_idx = 0
+        st.session_state.answers = [""] * 10
+        st.session_state.results = [None] * 10
+        st.session_state.total_points = 0.0
+        st.session_state.done = False
+        st.experimental_rerun()
 
-            grading_prompt = f"""
+st.divider()
+
+# =========================
+# Single-question flow UI
+# =========================
+if not st.session_state.questions:
+    st.info("Click **Start / Regenerate 10 Questions** to begin.")
+else:
+    idx = st.session_state.cur_idx
+    q = st.session_state.questions[idx]
+    st.markdown(f"### Question {idx+1}/10")
+    st.write(q)
+
+    # input
+    st.session_state.answers[idx] = st.text_area(
+        "Your answer",
+        key=f"ans_{idx}",
+        value=st.session_state.answers[idx],
+        height=130,
+        placeholder="Type your answer here…",
+    )
+
+    # ----- grader -----
+    def grade_one(question: str, answer: str) -> Dict:
+        if st.session_state.USE_MOCK:
+            # simple deterministic mock
+            verdict = (
+                "good"
+                if len(answer.strip()) > 40
+                else ("in-between" if len(answer.strip()) > 10 else "bad")
+            )
+            overall = 5 if verdict == "good" else (3 if verdict == "in-between" else 1)
+            clarity = overall
+            depth = overall
+            structure = overall
+            tip = (
+                "Excellent answer, keep it up!"
+                if verdict == "good"
+                else (
+                    "Add a concrete example and metrics."
+                    if verdict == "in-between"
+                    else "State the problem, your actions, and the result."
+                )
+            )
+            return {
+                "index": idx + 1,
+                "question": question,
+                "answer": (answer or "")[:80],
+                "verdict": verdict,
+                "comment": "Mock grade.",
+                "tip": tip,
+                "scores": {
+                    "Clarity": clarity,
+                    "Depth": depth,
+                    "Structure": structure,
+                    "Overall": overall,
+                },
+            }
+
+        safe_answer = (answer or "").replace('"', '\\"')
+        grading_prompt = f"""
 You are an expert interviewer and strict grader.
 
-Interviewer persona guideline: {persona_guides[persona]}
-Topic focus: {topic or 'General readiness'}
+Interviewer persona guideline: {persona_guides[st.session_state.persona]}
+Topic focus: {st.session_state.topic or 'General readiness'}
 
-You will receive 10 questions and the candidate's 10 answers (aligned by index).
+Grade ONE answer for ONE question.
 
-Scoring rubric (use independently per dimension; avoid uniform scoring):
-- Clarity: How clear and easy to follow the answer is.
-- Depth: Technical/insight depth and use of evidence/examples.
-- Structure: Logical flow and completeness (STAR for behavioral).
-- Overall: Holistic impression (relevance + correctness + impact).
-
-Guidance:
-- 5 = exceptional, 4 = solid, 3 = acceptable, 2 = weak, 1 = poor.
-- Only truly excellent answers should reach 5/5.
-- At least some variation across answers is expected when quality differs.
-
-Rules per item:
-- If the candidate answer is empty/blank, set:
-  "answer": "", "verdict": "bad", "points": 0,
+Rules:
+- If candidate answer is blank/empty -> set:
+  "answer": "", "verdict": "bad",
   "comment": "No answer provided.",
-  "scores": {{"Clarity":1,"Depth":1,"Structure":1,"Overall":1}},
-  "tip": "Add a concrete, specific answer."
-- Keep "answer" <= 12 words (shortened from user answer).
-- Keep "comment" <= 12 words, one sentence, specific.
-- Include a short "tip" for how to improve (<= 12 words).
-  If Overall == 5, tip must be: "Excellent answer — keep it up."
-- Use ONLY these verdicts: "good", "in-between", "bad".
-- Points: good=1, in-between=0.5, bad=0.   # (Client will compute final points by weighted score.)
+  "tip": "Start with a concrete example; outline Situation, Actions, Result.",
+  "scores": {{"Clarity":1,"Depth":1,"Structure":1,"Overall":1}}
+- Keep "answer" <= 25 words (shorten if longer).
+- "comment" <= 15 words, one sentence, specific.
+- "tip" <= 18 words; if perfect, write "Excellent answer, keep it up!".
+- Verdict in ["good","in-between","bad"].
 - Scores are integers 1..5.
-- Return EXACTLY 10 items, index 1..10.
-- Output ONLY valid JSON (no prose, no code fences).
-- Use double quotes for strings; escape internal quotes as \\".
-- Do not use smart quotes.
+- Output ONLY valid JSON (no prose, no code fences) in this schema:
 
-Return JSON with this schema:
 {{
-  "items": [
-    {{
-      "index": 1,
-      "question": "...",
-      "answer": "...",
-      "verdict": "good|in-between|bad",
-      "points": 1|0.5|0,
-      "comment": "...",
-      "tip": "...",
-      "scores": {{"Clarity": 1, "Depth": 1, "Structure": 1, "Overall": 1}}
-    }},
-    ... 10 items total ...
-  ]
+  "index": {idx+1},
+  "question": "{question.replace('"','\\"')}",
+  "answer": "...",
+  "verdict": "good|in-between|bad",
+  "comment": "...",
+  "tip": "...",
+  "scores": {{"Clarity": 1, "Depth": 1, "Structure": 1, "Overall": 1}}
 }}
 
-Questions:
-{json.dumps(questions, ensure_ascii=False)}
-
-Answers:
-{json.dumps(safe_answers, ensure_ascii=False)}
+Candidate answer (raw): "{safe_answer}"
 """
+        raw = ask_openai_json(
+            grading_prompt,
+            model=st.session_state.model,
+            max_tokens=st.session_state.grade_tokens,
+        )
+        try:
+            data = clean_and_parse_json(raw)
+            return data
+        except Exception:
+            # One retry with a simpler reminder
+            retry = (
+                grading_prompt
+                + "\nREMINDER: Output ONLY valid JSON exactly matching the schema."
+            )
+            raw2 = ask_openai_json(
+                retry,
+                model=st.session_state.model,
+                max_tokens=st.session_state.grade_tokens,
+            )
+            try:
+                return clean_and_parse_json(raw2)
+            except Exception:
+                # last resort basic outcome
+                return {
+                    "index": idx + 1,
+                    "question": question,
+                    "answer": (answer or "")[:80],
+                    "verdict": "in-between" if answer.strip() else "bad",
+                    "comment": "Parser fallback.",
+                    "tip": "Tighten structure and add metrics.",
+                    "scores": {
+                        "Clarity": 3 if answer.strip() else 1,
+                        "Depth": 3 if answer.strip() else 1,
+                        "Structure": 3 if answer.strip() else 1,
+                        "Overall": 3 if answer.strip() else 1,
+                    },
+                }
 
-            with st.spinner("Grading your 10 answers…"):
-                raw = ask_openai_json(
-                    grading_prompt, model=model, max_tokens=grade_tokens
-                )
+    # submit/grade
+    gcol1, gcol2 = st.columns([1, 1])
+    with gcol1:
+        grade_btn = st.button("💬 Submit & Grade", use_container_width=True)
+    with gcol2:
+        next_disabled = st.session_state.results[idx] is None
+        next_label = "➡️ Next Question" if idx < 9 else "🏁 Finish"
+        next_btn = st.button(
+            next_label, use_container_width=True, disabled=next_disabled
+        )
 
-            def _parse_items(raw_text: str):
-                js = raw_text.strip()
-                # Keep only innermost JSON block if wrappers exist
-                match = re.search(r"\{[\s\S]*\}", js)
-                if match:
-                    js = match.group(0)
-                # Remove trailing commas (but do not touch apostrophes)
-                js = re.sub(r",(\s*[}\]])", r"\1", js)
-                try:
-                    data = json.loads(js)
-                    return data.get("items", []), js
-                except json.JSONDecodeError:
-                    return [], js
+    # on grade
+    if grade_btn:
+        if misuse_guard(st.session_state.answers[idx]):
+            st.error("This looks unsafe or out of scope. Please rephrase.")
+        else:
+            with st.spinner("Grading…"):
+                result = grade_one(q, st.session_state.answers[idx])
+            # compute weighted + points (continuous)
+            sc = result.get("scores", {}) or {}
+            clarity = float(sc.get("Clarity", 0))
+            depth = float(sc.get("Depth", 0))
+            structure = float(sc.get("Structure", 0))
+            overall = float(sc.get("Overall", 0))
+            weighted = round((clarity + depth + structure + 2 * overall) / 5, 2)
+            # points from weighted (0..1)
+            points = min(1.0, round(weighted / 5.0, 2))
+            result["_weighted"] = weighted
+            result["_points"] = points
 
-            items, cleaned = _parse_items(raw)
+            st.session_state.results[idx] = result
+            st.session_state.total_points = round(
+                sum((r or {}).get("_points", 0.0) for r in st.session_state.results), 2
+            )
 
-            # Retry once if fewer than 10 items
-            if len(items) < 10:
-                retry_prompt = (
-                    grading_prompt
-                    + """
+    # show feedback (if graded)
+    res = st.session_state.results[idx]
+    if res is not None:
+        ICON = {"good": "✅", "in-between": "⚠️", "bad": "❌"}
+        COLOR = {"good": "green", "in-between": "orange", "bad": "red"}
+        verdict = (res.get("verdict") or "").lower()
+        icon = ICON.get(verdict, "❔")
+        color = COLOR.get(verdict, "gray")
+        points = res.get("_points", 0.0)
+        weighted = res.get("_weighted", 0.0)
 
-REMINDER:
-- Return ONLY a JSON object with key "items" that contains EXACTLY 10 entries.
-- No prose, no code fences.
-- Each item must include: index, question, answer, verdict, points, comment, tip, scores.
-"""
-                )
-                raw = ask_openai_json(
-                    retry_prompt, model=model, max_tokens=grade_tokens
-                )
-                items, cleaned = _parse_items(raw)
+        st.markdown(
+            f"<span style='color:{color};font-weight:700'>{icon} Q{idx+1} — {verdict.upper()} · +{points:.2f} pts</span>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(f"**Your (shortened) answer:** {res.get('answer','')}")
+        st.markdown(f"**Comment:** {res.get('comment','')}")
+        st.markdown(f"**Tip:** {res.get('tip','')}")
+        sc = res.get("scores", {}) or {}
+        st.markdown(
+            f"**Scores:** Clarity: {int(sc.get('Clarity',0))}/5 · "
+            f"Depth: {int(sc.get('Depth',0))}/5 · "
+            f"Structure: {int(sc.get('Structure',0))}/5 · "
+            f"Overall: {int(sc.get('Overall',0))}/5 "
+            f"(weighted: **{weighted}/5**)"
+        )
+        st.caption(f"Total so far: **{st.session_state.total_points:.2f}/10**")
 
-            if not items:
-                st.warning("Could not parse results. Showing raw output below:")
-                st.code(raw[:2000])
-            else:
-                if len(items) < 10:
-                    st.warning(
-                        f"Received only {len(items)}/10 graded items. Showing what we have."
-                    )
+    # on next
+    if next_btn and res is not None:
+        if idx < 9:
+            st.session_state.cur_idx += 1
+            st.experimental_rerun()
+        else:
+            st.session_state.done = True
+            st.experimental_rerun()
 
-                ICON = {"good": "✅", "in-between": "⚠️", "bad": "❌"}
-                COLOR = {"good": "green", "in-between": "orange", "bad": "red"}
-
-                total_points = 0.0
-                weighted_scores = []
-
-                st.markdown("### Results")
-                for it in items:
-                    idx = it.get("index", "?")
-                    verdict = (it.get("verdict") or "").lower()
-                    comment = it.get("comment", "")
-                    tip = it.get("tip", "")
-                    sc = it.get("scores", {}) or {}
-
-                    clarity = float(sc.get("Clarity", 0))
-                    depth = float(sc.get("Depth", 0))
-                    structure = float(sc.get("Structure", 0))
-                    overall = float(sc.get("Overall", 0))
-
-                    # Weighted score (Overall counts double)
-                    weighted = round((clarity + depth + structure + 2 * overall) / 5, 2)
-                    # Continuous points from weighted score (0..1)
-                    cont_points = max(0.0, min(1.0, round(weighted / 5.0, 2)))
-
-                    total_points += cont_points
-                    weighted_scores.append(weighted)
-
-                    icon = ICON.get(verdict, "❔")
-                    color = COLOR.get(verdict, "gray")
-
-                    st.markdown(
-                        f"<span style='color:{color}; font-weight:700'>{icon} Q{idx} — {verdict.upper()} · +{cont_points:.2f} pts</span>",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(f"**Question:** {it.get('question','')}")
-                    st.markdown(f"**Your answer:** {it.get('answer','')}")
-                    st.markdown(f"**Comment:** {comment}")
-                    st.markdown(
-                        f"**Scores:** Clarity: {int(clarity)}/5 · Depth: {int(depth)}/5 · "
-                        f"Structure: {int(structure)}/5 · Overall: {int(overall)}/5 "
-                        f"(weighted: **{weighted}/5**)"
-                    )
-                    if tip:
-                        st.markdown(f"**Tip:** {tip}")
-                    st.markdown("---")
-
-                avg_weighted = (
-                    round(sum(weighted_scores) / len(weighted_scores), 2)
-                    if weighted_scores
-                    else 0.0
-                )
-                st.success(
-                    f"🏁 **Round summary:** {total_points:.2f}/10.00 points · "
-                    f"Average weighted score: **{avg_weighted}/5** (Overall counted double)"
-                )
-
-                # Log to history
-                summary_block = "\n".join(
-                    [
-                        f"Q{it.get('index')}: verdict={it.get('verdict')}, "
-                        f"weighted={round(( (it.get('scores',{}) or {}).get('Clarity',0) + (it.get('scores',{}) or {}).get('Depth',0) + (it.get('scores',{}) or {}).get('Structure',0) + 2*(it.get('scores',{}) or {}).get('Overall',0) )/5, 2)}, "
-                        f"tip={it.get('tip','')}, comment={it.get('comment','')}"
-                        for it in items
-                    ]
-                )
-                st.session_state.history.append(
-                    {"type": "critique", "text": summary_block}
-                )
-
-# =========================
-# History / Export / Reset
-# =========================
 st.divider()
-c1, c2 = st.columns([1, 1])
-with c1:
-    if st.button("🧹 Clear History"):
-        st.session_state.history.clear()
-        st.experimental_rerun()
-with c2:
 
-    def build_md(hist):
+# =========================
+# Final Summary (after 10)
+# =========================
+if st.session_state.questions and st.session_state.done:
+    st.subheader("🏁 Final Summary")
+    items = st.session_state.results
+    ICON = {"good": "✅", "in-between": "⚠️", "bad": "❌"}
+    rows = []
+    for i, it in enumerate(items, 1):
+        if not it:
+            continue
+        rows.append(
+            {
+                "Q#": i,
+                "Verdict": it.get("verdict", ""),
+                "Points": f"{it.get('_points',0.0):.2f}",
+                "Weighted": f"{it.get('_weighted',0.0):.2f}/5",
+                "Tip": it.get("tip", ""),
+            }
+        )
+    # print as markdown table (simple)
+    if rows:
+        st.markdown("| Q# | Verdict | Points | Weighted | Tip |")
+        st.markdown("|---:|:-------:|------:|:--------:|:----|")
+        for r in rows:
+            st.markdown(
+                f"| {r['Q#']} | {r['Verdict']} | {r['Points']} | {r['Weighted']} | {r['Tip']} |"
+            )
+
+    total = round(sum((it or {}).get("_points", 0.0) for it in items), 2)
+    avg_weighted = round(
+        sum((it or {}).get("_weighted", 0.0) for it in items) / max(1, len(items)), 2
+    )
+    st.success(
+        f"**Final grade:** {total:.2f}/10 · Average weighted: **{avg_weighted}/5**"
+    )
+
+    # export block
+    def export_md() -> str:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        parts = [f"# PrepMate Session Export ({now})\n"]
-        for item in hist:
-            tag = "Grading" if item["type"] == "critique" else "Questions/Answers"
-            parts.append(f"## {tag}\n\n{item['text']}\n")
-        return "\n---\n".join(parts)
+        parts = [f"# PrepMate Summary ({now})\n", f"Topic: {st.session_state.topic}\n"]
+        for i, (q, a, it) in enumerate(
+            zip(st.session_state.questions, st.session_state.answers, items), 1
+        ):
+            parts.append(f"## Q{i}: {q}\n")
+            parts.append(f"**Your answer:**\n{a}\n")
+            if it:
+                parts.append(
+                    f"**Verdict:** {it.get('verdict')} · **Points:** {it.get('_points',0.0):.2f} · "
+                    f"**Weighted:** {it.get('_weighted',0.0):.2f}/5\n"
+                    f"**Comment:** {it.get('comment','')}\n**Tip:** {it.get('tip','')}\n"
+                )
+            parts.append("---\n")
+        parts.append(
+            f"**Final grade:** {total:.2f}/10 · Average weighted: **{avg_weighted}/5**\n"
+        )
+        return "\n".join(parts)
 
-    md = build_md(st.session_state.history)
+    md = export_md()
     st.download_button(
         "⬇️ Download Session (Markdown)",
         data=md.encode("utf-8"),
         file_name="prepmate_session.md",
         mime="text/markdown",
     )
-
-st.caption("© 2025 PrepMate — Built with Streamlit & OpenAI API")
