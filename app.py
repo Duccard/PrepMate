@@ -71,7 +71,7 @@ persona_badges = {
     "Sarcastic Interviewer": "😏 Sarcastic Interviewer",
 }
 
-# Final summary persona-flavored sign-off (shown once, not per item)
+# Persona-flavored final sign-off
 persona_signoff = {
     "Neutral": "Balanced performance – focus next on shoring up weaker areas.",
     "Friendly Coach": "Great effort! Small tweaks will unlock the next level.",
@@ -188,8 +188,8 @@ def ask_openai_text(
     prompt: str, *, model: str, temperature: float, top_p: float, max_tokens: int
 ) -> str:
     if ss.use_mock:
-        # Simple mock: echo first 10 lines as questions
-        if "Return EXACTLY 10 questions" in prompt:
+        # Simple mock questions
+        if "EXACTLY 10" in prompt and "Number them 1..10" in prompt:
             return "\n".join([f"{i}. Mock question {i}" for i in range(1, 11)])
         # Grader mock: one-item JSON
         if '"items"' in prompt:
@@ -303,15 +303,9 @@ with st.sidebar:
     )
     st.markdown(f"**Persona:** {persona_badges[ss.persona]}")
     st.markdown("### ⚙️ Model")
-    ss.model = st.selectbox(
-        "Model",
-        ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"],
-        index=(
-            ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"].index(ss.model)
-            if ss.model in ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"]
-            else 0
-        ),
-    )
+    model_choices = ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"]
+    default_idx = model_choices.index(ss.model) if ss.model in model_choices else 0
+    ss.model = st.selectbox("Model", model_choices, index=default_idx)
     temperature = st.slider("Temperature", 0.0, 1.5, 0.7, 0.1)
     top_p = st.slider("Top-p sampling", 0.0, 1.0, 1.0, 0.05)
     max_tokens = st.slider("Max output tokens", 200, 2000, 800, 50)
@@ -352,17 +346,11 @@ def render_start():
                     ss.jd_text = raw.decode("cp1252", errors="ignore")
                 ss.jd_text = ss.jd_text[:200000]  # hard cap
 
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        if st.button("🧠 Generate Questions", use_container_width=True):
-            if misuse_guard(ss.topic, ss.jd_text):
-                st.error("This looks unsafe or out of scope. Please rephrase.")
-                return
-            generate_questions()
-    with col2:
-        st.caption(
-            "After generating: **✅ Questions ready. Click _Submit answer_ for scoring and feedback.**"
-        )
+    if st.button("🧠 Generate Questions", use_container_width=True):
+        if misuse_guard(ss.topic, ss.jd_text):
+            st.error("This looks unsafe or out of scope. Please rephrase.")
+            return
+        generate_questions()
 
 
 def generate_questions():
@@ -391,13 +379,10 @@ Format:
 """
     with st.spinner("Generating questions…"):
         raw = ask_openai_text(
-            prompt,
-            model=ss.model,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
+            prompt, model=ss.model, temperature=0.6, top_p=1.0, max_tokens=max_tokens
         )
-    # parse 10 lines
+
+    # Parse 10 lines
     lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
     qs: List[str] = []
     for ln in lines:
@@ -412,15 +397,18 @@ Format:
     qs = qs[:10]
     while len(qs) < 10:
         qs.append("(placeholder)")
+
     ss.questions = qs
     ss.current_idx = 0
     ss.results = []
     ss.quiz_running = True
-    st.toast(
-        "✅ Questions ready. Click **Submit answer** for scoring and feedback.",
-        icon="✅",
-    )
-    st.experimental_rerun()
+
+    try:
+        st.toast("✅ Questions ready.", icon="✅")
+    except Exception:
+        pass
+
+    st.rerun()
 
 
 # =========================
@@ -465,15 +453,14 @@ JSON Schema (single item only):
 Question: {json.dumps(question, ensure_ascii=False)}
 Answer: {json.dumps(safe_answer, ensure_ascii=False)}
 """
-    raw = ask_openai_json(rules, model=ss.model, max_tokens=max_tokens)
+    raw = ask_openai_json(rules, model=ss.model, max_tokens=600)
     items = parse_items(raw)
     if not items:
-        # Retry once with a reminder
         retry = (
             rules
             + "\nREMINDER: Return ONLY the JSON object as specified, with exactly one item."
         )
-        raw = ask_openai_json(retry, model=ss.model, max_tokens=max_tokens)
+        raw = ask_openai_json(retry, model=ss.model, max_tokens=600)
         items = parse_items(raw)
     if not items:
         # last-resort synthetic bad
@@ -490,7 +477,6 @@ Answer: {json.dumps(safe_answer, ensure_ascii=False)}
             }
         ]
     item = items[0]
-    # Ensure the model echoed the actual question/answer we asked about
     item["question"] = question
     item["answer"] = answer.strip()
     return normalize_item(item)
@@ -507,11 +493,9 @@ def render_quiz():
         render_final()
         return
 
-    # Persona badge header
     st.markdown(
         f"**{persona_badges[ss.persona]}**  •  Difficulty: **{ss.difficulty}**  •  Q {i+1}/{total}"
     )
-
     q = qs[i]
     st.subheader(f"Q{i+1}. {q}")
 
@@ -533,7 +517,7 @@ def render_quiz():
             else:
                 with st.spinner("Scoring…"):
                     result = grade_one(q, ans)
-                # Show feedback
+
                 ICON = {"good": "✅", "in-between": "⚠️", "bad": "❌"}
                 COLOR = {"good": "green", "in-between": "orange", "bad": "red"}
                 icon = ICON.get(result["verdict"], "❔")
@@ -564,7 +548,7 @@ def render_quiz():
                 # Next question button
                 if st.form_submit_button("➡️ Next question"):
                     ss.current_idx += 1
-                    st.experimental_rerun()
+                    st.rerun()
 
     # Allow quitting mid-quiz
     st.button("⏹️ End quiz & show summary", on_click=lambda: _end_quiz_now())
@@ -572,7 +556,7 @@ def render_quiz():
 
 def _end_quiz_now():
     ss.current_idx = len(ss.questions)
-    st.experimental_rerun()
+    st.rerun()
 
 
 # =========================
@@ -617,7 +601,7 @@ def render_final():
         unsafe_allow_html=True,
     )
 
-    # Persona sign-off (general feedback)
+    # Persona sign-off
     st.markdown(f"**{persona_badges[ss.persona]} says:** {persona_signoff[ss.persona]}")
 
     # Build final table
@@ -668,19 +652,11 @@ def render_final():
 
     # Restart option
     def _reset_all():
-        for k in [
-            "quiz_running",
-            "questions",
-            "current_idx",
-            "results",
-            "topic",
-            "jd_text",
-        ]:
-            ss[k] = ss.get(k) if k in ["topic", "jd_text"] else None
         ss.quiz_running = False
         ss.questions, ss.results = [], []
         ss.current_idx = 0
-        st.experimental_rerun()
+        # keep topic & jd_text for convenience
+        st.rerun()
 
     st.button("🔁 Take another quiz", on_click=_reset_all)
 
