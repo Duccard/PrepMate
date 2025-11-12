@@ -33,7 +33,7 @@ def _init():
     SS.setdefault("difficulty", "Medium")
     SS.setdefault("persona", "Neutral")
     SS.setdefault("model", "gpt-4.1")
-    SS.setdefault("max_tokens", 700)
+    SS.setdefault("max_tokens", 800)
     SS.setdefault("use_mock", False)
 
     SS.setdefault("jd_text", "")
@@ -41,12 +41,10 @@ def _init():
 
     SS.setdefault("questions", [])  # list[str] length 10
     SS.setdefault("idx", 0)  # 0..9
-    SS.setdefault("graded", [])  # per-question results
-    SS.setdefault("last_feedback", None)  # last question feedback dict
-    SS.setdefault("finished", False)
-    SS.setdefault(
-        "feedback_ready_for_idx", -1
-    )  # which index currently has feedback rendered
+    SS.setdefault("graded", [])  # per-question results dicts
+    SS.setdefault("last_feedback", None)  # dict for current Q
+    SS.setdefault("feedback_ready_for_idx", -1)
+    SS.setdefault("finished", False)  # True -> show final
 
 
 _init()
@@ -58,6 +56,11 @@ difficulty_tips = {
     "Easy": "Ask straightforward, entry-level questions testing basic understanding.",
     "Medium": "Ask mid-level questions involving reasoning and real examples.",
     "Hard": "Ask complex, scenario-based questions testing depth and creativity.",
+}
+difficulty_colors = {
+    "Easy": "#1b8f4b",  # green
+    "Medium": "#caa000",  # yellow
+    "Hard": "#b21f2d",  # red
 }
 
 persona_guides = {
@@ -84,24 +87,24 @@ persona_badge = {
     "Sarcastic Interviewer": "😏 Sarcastic",
 }
 
-# Persona “quotes” (no brackets, no quotes; will be merged into feedback)
-persona_quote = {
+# Persona tone snippets (merged into comment previously; now shown as its own “Interviewer comment”)
+persona_line = {
     "Neutral": "Clear, direct, and sufficiently evidenced.",
-    "Friendly Coach": "Nice work—two tweaks and you’ll nail it.",
+    "Friendly Coach": "Good energy—two small tweaks and you’ll nail it.",
     "Strict Bar-Raiser": "Show the numbers—claims without proof won’t pass.",
-    "Motivational Mentor": "You’re close—refine structure and finish strong.",
-    "Calm Psychologist": "Notice your reasoning flow—tighten the links.",
-    "Playful Mock Interviewer": "Spice level is mild—add heat with specifics.",
-    "Corporate Recruiter": "Translate this into business impact.",
-    "Algorithmic Stickler": "Enumerate assumptions, state invariants, cite metrics.",
-    "Sarcastic Interviewer": "Decent—but let’s not write fortune-cookie wisdom.",
+    "Motivational Mentor": "Strong direction—tighten structure and finish with impact.",
+    "Calm Psychologist": "Observe your reasoning flow—align claims to evidence.",
+    "Playful Mock Interviewer": "Spice level is mild—kick it up with specifics.",
+    "Corporate Recruiter": "Translate this into business impact and stakeholder value.",
+    "Algorithmic Stickler": "State assumptions, define invariants, cite metrics.",
+    "Sarcastic Interviewer": "Nice. Let’s step beyond fortune-cookie wisdom, shall we?",
 }
 
 COLOR = {"good": "green", "in-between": "orange", "bad": "red"}
 ICON = {"good": "✅", "in-between": "⚠️", "bad": "❌"}
 
 # =========================
-# Hard-zero detector (improved)
+# Hard-zero detector (don’t know / don’t care / blank)
 # =========================
 AUTO_ZERO_PATTERNS = [
     r"^\s*$",
@@ -220,7 +223,6 @@ def render_start():
                 except Exception:
                     st.warning("Could not read text file; ignoring.")
             else:
-                # PDF: keep only the filename note; do not parse PDF content here
                 SS.jd_text = ""
                 SS.jd_pdf_name = jd_file.name
                 st.info(
@@ -284,7 +286,6 @@ Return plain text only.
     lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
     q10 = []
     for ln in lines:
-        # Accept "1. ..." / "1) ..." / "1 - ..." / "1:" patterns
         if re.match(r"^\d+\s*[\.\)::-]\s*", ln):
             q10.append(re.sub(r"^\d+\s*[\.\)::-]\s*", "", ln).strip())
         elif re.match(r"^\d+\s+", ln):
@@ -307,8 +308,54 @@ Return plain text only.
 # =========================
 # Grading helpers
 # =========================
+def classic_mapping(weighted: float) -> Dict[str, Any]:
+    """Return verdict & points from weighted (classic strictness)."""
+    if weighted >= 4.0:
+        return {"verdict": "good", "points": 1.0}
+    if weighted >= 2.0:
+        return {"verdict": "in-between", "points": 0.5}
+    return {"verdict": "bad", "points": 0.0}
+
+
+def heuristic_strength_bonus(answer: str) -> int:
+    """
+    If model under-scores a clearly strong answer, we give a small boost.
+    Signals: examples, metrics, structure, tradeoffs.
+    """
+    a = (answer or "").lower()
+    score = 0
+    if any(k in a for k in ["e.g.", "for example", "for instance", "example:"]):
+        score += 1
+    if any(
+        k in a
+        for k in [
+            "%",
+            "percent",
+            "ms",
+            "latency",
+            "throughput",
+            "downtime",
+            "nps",
+            "conversion",
+            "f1",
+            "auc",
+        ]
+    ):
+        score += 1
+    if any(
+        k in a
+        for k in ["trade-off", "tradeoff", "pros and cons", "cons", "constraints"]
+    ):
+        score += 1
+    if any(k in a for k in ["first,", "second,", "third,", "step", "phase", "stage"]):
+        score += 1
+    if "because" in a or "therefore" in a:
+        score += 1
+    return score  # 0..5
+
+
 def normalize_item(item: dict, index: int) -> dict:
-    """Make sure the item is well-formed and apply classic strictness mapping."""
+    """Make sure the item is well-formed and apply strictness mapping + heuristic bump."""
     item = item or {}
     q = str(item.get("question", ""))
     a = str(item.get("answer", ""))
@@ -320,7 +367,7 @@ def normalize_item(item: dict, index: int) -> dict:
     structure = int(sc.get("Structure", 0))
     overall = int(sc.get("Overall", 0))
 
-    # Hard zero for don't-know-type answers (before any mapping)
+    # Hard zero for don't-know-type answers
     if is_auto_zero(a):
         verdict = "bad"
         points = 0.0
@@ -330,12 +377,15 @@ def normalize_item(item: dict, index: int) -> dict:
         weighted = 0.0
     else:
         weighted = round((clarity + depth + structure + 2 * overall) / 5, 2)
-        if weighted >= 4.0:
-            verdict, points = "good", 1.0
-        elif weighted >= 2.0:
-            verdict, points = "in-between", 0.5
-        else:
-            verdict, points = "bad", 0.0
+
+        # Heuristic boost if model was too harsh
+        boost = heuristic_strength_bonus(a)
+        if boost >= 3 and weighted < 4.0:
+            weighted = min(5.0, round(weighted + 0.5, 2))
+
+        verdict_points = classic_mapping(weighted)
+        verdict = verdict_points["verdict"]
+        points = verdict_points["points"]
 
     return {
         "index": index,
@@ -352,6 +402,7 @@ def normalize_item(item: dict, index: int) -> dict:
             "Structure": structure,
             "Overall": overall,
         },
+        # persona_comment added below (separate UI block)
     }
 
 
@@ -359,20 +410,20 @@ def grade_one(question: str, answer: str) -> Dict:
     """Grade a single Q/A with persona & difficulty. JSON mode -> normalized."""
     # Fast path: auto-zero first
     if is_auto_zero(answer):
-        return normalize_item(
+        base = normalize_item(
             {
                 "question": question,
                 "answer": answer,
                 "comment": "No useful answer provided.",
-                "tip": "Give a concrete example and a short framework next time.",
+                "tip": "Give one concrete example and a short framework next time.",
                 "scores": {"Clarity": 0, "Depth": 0, "Structure": 0, "Overall": 0},
             },
             index=SS.idx + 1,
         )
+        base["persona_comment"] = persona_line[SS.persona]
+        return base
 
     persona = persona_guides[SS.persona]
-    p_quote = persona_quote[SS.persona]
-
     g_prompt = f"""
 You are grading ONE answer in the style of this persona:
 {persona}
@@ -388,7 +439,7 @@ Rules:
     elif weighted >= 2.0 → verdict="in-between", points=0.5
     else → verdict="bad", points=0.0
 - comment ≤ 14 words, tip ≤ 16 words, both in persona tone.
-- Merge the persona phrase into the comment naturally (no brackets, no quotes), e.g. "{p_quote} — then your comment".
+- Provide a separate short `persona_comment` that reads like a human line in that persona voice (no brackets or quotes).
 - If answer is vague, name the missing detail (metric, tradeoff, example, assumption).
 - Output valid JSON only, no code fences.
 
@@ -397,6 +448,7 @@ Return:
   "items": [{{
     "question": "{question}",
     "answer": "{answer}",
+    "persona_comment": "",
     "comment": "",
     "tip": "",
     "scores": {{"Clarity": 1, "Depth": 1, "Structure": 1, "Overall": 1}}
@@ -405,21 +457,25 @@ Return:
 """
     if SS.use_mock:
         words = len((answer or "").split())
-        if words > 30:
+        if words > 40:
             sc = {"Clarity": 5, "Depth": 5, "Structure": 4, "Overall": 5}
-            cm = f"{p_quote} — Strong, detailed and coherent."
+            cm = "Rigorous, structured, and outcome-focused."
             tp = "Excellent depth; keep explicit trade-offs."
-        elif words > 12:
+            pc = persona_line[SS.persona]
+        elif words > 16:
             sc = {"Clarity": 4, "Depth": 3, "Structure": 3, "Overall": 3}
-            cm = f"{p_quote} — Add specifics and measurable outcomes."
+            cm = "Good direction—add metrics and tradeoffs."
             tp = "Include one metric and example."
+            pc = persona_line[SS.persona]
         else:
             sc = {"Clarity": 2, "Depth": 2, "Structure": 2, "Overall": 2}
-            cm = f"{p_quote} — Too brief to assess value."
+            cm = "Too brief to assess value."
             tp = "Use a 3-step structure and one result."
+            pc = persona_line[SS.persona]
         js_item = {
             "question": question,
             "answer": answer,
+            "persona_comment": pc,
             "comment": cm,
             "tip": tp,
             "scores": sc,
@@ -433,38 +489,52 @@ Return:
         js_item = {
             "question": question,
             "answer": answer,
-            "comment": f"{p_quote} — Partial credit; add specifics.",
+            "persona_comment": persona_line[SS.persona],
+            "comment": "Partial credit—add specifics and measurable outcomes.",
             "tip": "State one metric and a concrete example.",
             "scores": {"Clarity": 3, "Depth": 2, "Structure": 3, "Overall": 2},
         }
         return normalize_item(js_item, index=SS.idx + 1)
 
-    # Merge persona phrase into returned comment if the model forgot
     item = items[0]
-    cmt = str(item.get("comment", "")).strip()
-    if p_quote not in cmt:
-        item["comment"] = f"{p_quote} — {cmt}" if cmt else p_quote
-
+    if not item.get("persona_comment"):
+        item["persona_comment"] = persona_line[SS.persona]
     return normalize_item(item, index=SS.idx + 1)
 
 
 # =========================
-# Per-question flow
+# UI helpers
 # =========================
 def persona_header():
+    diff = SS.difficulty
+    diff_color = difficulty_colors[diff]
     st.markdown(
         f"""
 <div style="display:flex;gap:8px;align-items:center;margin:6px 0 12px 0;">
   <div style="background:#111;color:#fff;padding:6px 10px;border-radius:999px;font-weight:700">{persona_badge[SS.persona]}</div>
-  <div style="background:#0b5;padding:6px 10px;border-radius:999px;color:#fff;font-weight:700">Difficulty: {SS.difficulty}</div>
+  <div style="background:{diff_color};padding:6px 10px;border-radius:999px;color:#fff;font-weight:700">Difficulty: {diff}</div>
 </div>
 """,
         unsafe_allow_html=True,
     )
 
 
+# =========================
+# Per-question flow
+# =========================
 def render_quiz():
+    # If finished already, go straight to final
+    if SS.finished:
+        render_final()
+        return
+
+    # Safety guard
+    if not SS.questions:
+        return
+
+    # Current Q
     if SS.idx >= len(SS.questions):
+        SS.finished = True
         render_final()
         return
 
@@ -474,7 +544,6 @@ def render_quiz():
     st.subheader(f"Question {SS.idx+1}/10")
     st.markdown(f"**{q}**")
 
-    # ------------- Answer form -------------
     with st.form(key=f"qa_form_{SS.idx}"):
         ans_key = f"ans_{SS.idx}"
         ans_val = st.text_area(
@@ -484,34 +553,29 @@ def render_quiz():
             placeholder="Answer here…",
         )
         submit = st.form_submit_button("💬 Submit answer for scoring and feedback")
-
         if submit:
             SS[ans_key] = ans_val
             result = grade_one(q, ans_val)
-
-            # Store/replace graded result for current idx
             if len(SS.graded) > SS.idx:
                 SS.graded[SS.idx] = result
             else:
                 SS.graded.append(result)
-
             SS.last_feedback = result
-            SS.feedback_ready_for_idx = (
-                SS.idx
-            )  # mark feedback is ready for current index
+            SS.feedback_ready_for_idx = SS.idx
 
-    # ------------- Feedback block (after form) -------------
     fb = SS.last_feedback
     if fb and SS.feedback_ready_for_idx == SS.idx:
         verdict = fb["verdict"]
         icon = ICON[verdict]
         color = COLOR[verdict]
+
         st.markdown(
             f"<div style='padding:10px;border:1px solid {color};border-left:6px solid {color};border-radius:8px'>"
             f"<div style='font-weight:800;color:{color}'>{icon} Verdict: {verdict.upper()} · +{fb['points']:.1f} pts · Weighted: {fb['weighted']:.2f}/5</div>"
             f"<div><b>Scores:</b> Clarity: {fb['scores']['Clarity']}/5 · Depth: {fb['scores']['Depth']}/5 · "
             f"Structure: {fb['scores']['Structure']}/5 · Overall: {fb['scores']['Overall']}/5</div>"
-            f"<div style='margin-top:6px'><b>Feedback:</b> {fb['comment']}</div>"
+            f"<div style='margin-top:6px'><b>Interviewer comment:</b> {item_or_default(fb, 'persona_comment', persona_line[SS.persona])}</div>"
+            f"<div><b>Feedback:</b> {fb['comment']}</div>"
             f"<div><b>Tip:</b> {fb['tip']}</div>"
             f"</div>",
             unsafe_allow_html=True,
@@ -520,14 +584,30 @@ def render_quiz():
             0.0 if verdict == "bad" else (0.5 if verdict == "in-between" else 1.0)
         )
 
-        # Next button OUTSIDE the form, keyed to current index
-        if st.button("➡️ Next question", key=f"next_{SS.idx}"):
-            SS.idx += 1
-            SS.last_feedback = None
-            SS.feedback_ready_for_idx = -1
-            if SS.idx >= 10:
-                SS.finished = True
-            rerun()
+        # Navigation: Next or Finish
+        colA, colB = st.columns([1, 1])
+        with colA:
+            if SS.idx < 9:
+                if st.button("➡️ Next question", key=f"next_{SS.idx}"):
+                    SS.idx += 1
+                    SS.last_feedback = None
+                    SS.feedback_ready_for_idx = -1
+                    rerun()
+        with colB:
+            if SS.idx == 9:
+                if st.button("🏁 Finish & view results", key="finish_btn"):
+                    SS.finished = True
+                    rerun()
+
+
+def item_or_default(d: dict, key: str, default: str) -> str:
+    try:
+        v = d.get(key)
+        if isinstance(v, str) and v.strip():
+            return v
+    except Exception:
+        pass
+    return default
 
 
 # =========================
@@ -543,6 +623,7 @@ def readiness_badge(total_pts: float) -> str:
 
 def render_final():
     st.subheader("🏁 Final Evaluation")
+
     items = SS.graded
     total_points = round(sum(i.get("points", 0) for i in items), 2)
     avg_weighted = round(
@@ -562,7 +643,7 @@ def render_final():
   {badge} — Total Points: {total_points}/10 · Avg Weighted: {avg_weighted}/5
 </div>
 <div style="margin-top:8px;font-style:italic;opacity:0.9">
-  <b>{persona_badge[SS.persona]}</b> — {persona_quote[SS.persona]}
+  <b>{persona_badge[SS.persona]}</b> — {persona_line[SS.persona]}
 </div>
 """,
         unsafe_allow_html=True,
@@ -595,11 +676,11 @@ def render_final():
 # =========================
 # Router
 # =========================
-if not SS.questions or SS.finished:
-    # Show setup only when no active quiz or finished
-    render_start()
-    if SS.questions and not SS.finished:
-        pass
-else:
-    # Hide setup once questions exist
+# After generation, hide setup; after finishing, show final (not the setup)
+if SS.questions and not SS.finished:
+    # hide setup panels
     render_quiz()
+elif SS.finished:
+    render_final()
+else:
+    render_start()
