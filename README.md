@@ -25,8 +25,8 @@ https://prepmate-vehotkn5mymmd3kbyrnppd.streamlit.app/
 2. Create and activate a virtual environment
 
 python -m venv .venv
-source .venv/bin/activate     # mac/linux
-# .\.venv\Scripts\activate    # windows
+source .venv/bin/activate    
+.\.venv\Scripts\activate    
 
 3. Install dependencies
 
