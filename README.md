@@ -40,7 +40,7 @@ OPENAI_API_KEY=sk-yourkeyhere
 5. Run the app:
 streamlit run app.py
 
-📋 How it works
+## 📋 How it works
 
 Choose your role, difficulty, and what you want to practice.
 
@@ -48,7 +48,7 @@ Choose your role, difficulty, and what you want to practice.
 
 Click Generate Questions — the app will create relevant interview questions using OpenAI.
 
-🧩 Tech Stack
+## 🧩 Tech Stack
 
 Python 3.11+
 
