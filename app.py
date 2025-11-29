@@ -213,23 +213,34 @@ badge(f"Interviewer: {persona}", "#a5b4fc")
 
 # Topic & Optional Context (hidden after start)
 if not st.session_state.started:
+    # Main topic subtitle
+    st.markdown("### What do you want to practice?")
     topic = st.text_area(
-        "What do you want to practice?",
+        "",
         placeholder="e.g., System design, SQL, leadership, data analysis…",
         height=90,
         key="topic_input",
+        label_visibility="collapsed",
     )
 
-    st.markdown("### 📎 Optional: Upload Job Description or Resume (TXT, MD, PDF)")
-    files = st.file_uploader(
-        "Attach files (optional)", type=["txt", "md", "pdf"], accept_multiple_files=True
-    )
-    jd_text = st.text_area(
-        "Optional: paste Job Description (text)", height=120, key="jd_paste"
-    )
-    resume_text = st.text_area(
-        "Optional: paste your Resume highlights", height=120, key="resume_paste"
-    )
+    # Optional inputs are hidden inside a clickable expander
+    files = None
+    jd_text = ""
+    resume_text = ""
+
+    with st.expander("📎 Optional: Upload Job Description or Resume (TXT, MD, PDF)"):
+        st.markdown(
+            "Use these fields if you want more tailored questions based on a job ad or your CV."
+        )
+        files = st.file_uploader(
+            "Attach files (optional)",
+            type=["txt", "md", "pdf"],
+            accept_multiple_files=True,
+        )
+        jd_text = st.text_area("Job Description (optional)", height=120, key="jd_paste")
+        resume_text = st.text_area(
+            "Resume highlights (optional)", height=120, key="resume_paste"
+        )
 
     def read_file_safe(f):
         try:
