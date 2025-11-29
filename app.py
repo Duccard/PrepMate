@@ -9,9 +9,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# =========================
 # Bootstrapping
-# =========================
 st.set_page_config(page_title="PrepMate: Interview Practice", layout="wide")
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -25,17 +23,15 @@ if not OPENAI_API_KEY:
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# =========================
 # Helpers & Config
-# =========================
 def init_state():
     ss = st.session_state
     ss.setdefault("q10", [])
-    ss.setdefault("idx", 0)  # 0..9
-    ss.setdefault("graded", [])  # list of per-question results
-    ss.setdefault("last_feedback", None)  # last feedback dict for current idx
+    ss.setdefault("idx", 0)
+    ss.setdefault("graded", [])
+    ss.setdefault("last_feedback", None)
     ss.setdefault("finished", False)
-    ss.setdefault("started", False)  # hide topic panel after start
+    ss.setdefault("started", False)
     ss.setdefault("run_id", 0)
 
 
@@ -47,7 +43,6 @@ difficulty_tips = {
     "Hard": "Ask complex, scenario-based questions testing depth and creativity.",
 }
 
-# Persona guide (for grading prompt)
 persona_guides = {
     "Neutral": "Professional, concise, unbiased phrasing. Focus on clarity and substance.",
     "Friendly coach": "Warm, encouraging, highlight strengths first, then gentle suggestions.",
@@ -59,7 +54,6 @@ persona_guides = {
     "Sarcastic Interviewer": "Dry, a bit snarky, incisive; cutting but helpful observations.",
 }
 
-# Persona reaction lines (varied; we’ll rotate for variety)
 persona_lines = {
     "Neutral": [
         "Clear thinking starts with clear structure—tighten one example and one metric.",
@@ -103,7 +97,6 @@ persona_lines = {
     ],
 }
 
-# Automatic zero patterns
 AUTO_ZERO_PATTERNS = [
     r"^\s*$",
     r"^\s*(don'?t|do not)\s+know\s*$",
@@ -147,7 +140,6 @@ def ask_openai_text(
 
 
 def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
-    # Use JSON mode if available; fall back to text
     try:
         resp = client.responses.create(
             model=model,
@@ -159,7 +151,6 @@ def ask_openai_json(prompt: str, *, model: str, max_tokens: int) -> str:
         )
         return resp.output_text
     except Exception:
-        # Fallback as plain text
         return ask_openai_text(
             prompt, model=model, max_tokens=max_tokens, temperature=0.2
         )
@@ -171,14 +162,13 @@ def parse_first_json(text: str):
         if not m:
             return None
         js = m.group(0)
-        js = re.sub(r",(\s*[}\]])", r"\1", js)  # strip trailing commas
+        js = re.sub(r",(\s*[}\]])", r"\1", js)
         return json.loads(js)
     except Exception:
         return None
 
 
 def band_from_weighted(w: float) -> str:
-    # 0–1 very bad, 1–2 bad, 2–3 intermediate, 3–4 good, 4–5 very good
     if w < 1:
         return "very bad"
     if w < 2:
@@ -198,9 +188,7 @@ def badge(label: str, color: str):
     )
 
 
-# =========================
 # Sidebar (hidden after start)
-# =========================
 with st.sidebar:
     st.header("⚙️ Settings")
     difficulty = st.select_slider(
@@ -211,24 +199,19 @@ with st.sidebar:
     max_tokens = st.slider("Max tokens (per call)", 300, 1600, 800)
     USE_MOCK = st.toggle("🧪 Mock mode", False)
 
-# =========================
 # Header
-# =========================
 st.title("PrepMate: Interview Practice")
 st.caption(
     "Answer one question at a time, get instant feedback, and a final evaluation at the end."
 )
 
-# Difficulty & persona badges (always visible)
 difficulty_color = {"Easy": "#21c55d", "Medium": "#fbbf24", "Hard": "#ef4444"}[
     difficulty
 ]
 badge(f"Difficulty: {difficulty}", difficulty_color)
 badge(f"Interviewer: {persona}", "#a5b4fc")
 
-# =========================
 # Topic & Optional Context (hidden after start)
-# =========================
 if not st.session_state.started:
     topic = st.text_area(
         "What do you want to practice?",
@@ -248,11 +231,9 @@ if not st.session_state.started:
         "Optional: paste your Resume highlights", height=120, key="resume_paste"
     )
 
-    # Build context string
     def read_file_safe(f):
         try:
             raw = f.read()
-            # Light decode; for PDF we won't parse—just pass filename stub as context
             if f.type in ("text/plain", "text/markdown"):
                 try:
                     return raw.decode("utf-8")
@@ -269,7 +250,6 @@ if not st.session_state.started:
             attached_blobs.append(read_file_safe(f))
     attached_context = "\n".join(attached_blobs).strip()
 
-    # Generate Questions
     if st.button("🧠 Generate Questions", use_container_width=True):
         if misuse_guard(topic, jd_text, resume_text, attached_context):
             st.error("This looks unsafe or out of scope. Please rephrase.")
@@ -303,7 +283,6 @@ Create EXACTLY 10 interview questions that MIX technical and behavioral angles a
                 out = ask_openai_text(
                     prompt, model=model, max_tokens=700, temperature=0.4
                 )
-                # Parse numbered lines
                 lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
                 q10 = []
                 for ln in lines:
@@ -317,11 +296,9 @@ Create EXACTLY 10 interview questions that MIX technical and behavioral angles a
                             q = ln[len(head) :]
                         q10.append(q.strip(" -–•\t"))
                 q10 = q10[:10]
-                # Fallback placeholders if fewer (rare)
                 while len(q10) < 10:
                     q10.append(f"Follow-up question {len(q10)+1}")
 
-            # Start session
             st.session_state.q10 = q10
             st.session_state.idx = 0
             st.session_state.graded = []
@@ -330,11 +307,8 @@ Create EXACTLY 10 interview questions that MIX technical and behavioral angles a
             st.session_state.started = True
 
 
-# =========================
 # One-by-one flow
-# =========================
 def grade_one(q_idx: int, question: str, answer: str) -> Dict:
-    # Auto-zero path
     if is_auto_zero(answer):
         return {
             "index": q_idx + 1,
@@ -383,7 +357,6 @@ Question: "{question}"
 Answer: "{answer.replace('"', '\\"')}"
 """
     if USE_MOCK:
-        # Simple mock heuristic for variety
         wc = len(answer.split())
         clarity = min(5, max(1, 1 + wc // 12))
         depth = min(5, max(1, 1 + wc // 15))
@@ -412,7 +385,6 @@ Answer: "{answer.replace('"', '\\"')}"
     raw = ask_openai_json(grading_prompt, model=model, max_tokens=700)
     js = parse_first_json(raw)
     if not js or "item" not in js:
-        # Safe fallback (mid band) – but keep variety via persona line
         return {
             "index": q_idx + 1,
             "question": question,
@@ -427,7 +399,6 @@ Answer: "{answer.replace('"', '\\"')}"
         }
 
     item = js["item"]
-    # Clamp and compute band robustly
     c = int(item.get("Clarity", 1))
     d = int(item.get("Depth", 1))
     s = int(item.get("Structure", 1))
@@ -453,7 +424,6 @@ Answer: "{answer.replace('"', '\\"')}"
     }
 
 
-# If session started, run the Q&A flow
 if st.session_state.started and not st.session_state.finished:
     q_list = st.session_state.q10
     idx = st.session_state.idx
@@ -463,7 +433,6 @@ if st.session_state.started and not st.session_state.finished:
     st.subheader(f"Question {idx+1}/10")
     st.markdown(f"**{question}**")
 
-    # Answer box (unique key per index so it resets each question)
     answer = st.text_area(
         "Your answer",
         key=f"ans_{idx}",
@@ -471,7 +440,6 @@ if st.session_state.started and not st.session_state.finished:
         placeholder="Type your answer here…",
     )
 
-    # Submit & grade
     if st.button(
         "💬 Submit answer for scoring and feedback",
         key=f"grade_btn_{idx}",
@@ -481,10 +449,8 @@ if st.session_state.started and not st.session_state.finished:
         st.session_state.last_feedback = fb
         st.session_state.graded.append(fb)
 
-    # Show feedback (if any)
     fb = st.session_state.last_feedback
     if fb and fb.get("index") == idx + 1:
-        # Persona flavored main comment on top (longer, merged)
         st.markdown(
             f"<div style='border:2px solid {difficulty_color};padding:14px;border-radius:8px;'>"
             f"{fb['persona_note']} {fb['comment']}"
@@ -492,7 +458,6 @@ if st.session_state.started and not st.session_state.finished:
             unsafe_allow_html=True,
         )
 
-        # Verdict panel
         color_map = {
             "very bad": "#ef4444",
             "bad": "#f97316",
@@ -513,16 +478,13 @@ if st.session_state.started and not st.session_state.finished:
         )
         st.progress(min(1.0, max(0.0, fb["points"])))
 
-        # Next question
         if st.button("➡️ Next Question", key=f"next_{idx}", use_container_width=True):
             st.session_state.idx += 1
             st.session_state.last_feedback = None
             if st.session_state.idx >= 10:
                 st.session_state.finished = True
 
-# =========================
 # Final summary
-# =========================
 if st.session_state.finished:
     st.divider()
     st.subheader("🏁 Final Evaluation")
@@ -550,9 +512,8 @@ if st.session_state.finished:
         unsafe_allow_html=True,
     )
 
-    # Stretch question/answer columns
     st.markdown("### Feedback Table")
-    cols = st.columns([3, 4, 1.2, 2.4])  # wider Question & Answer
+    cols = st.columns([3, 4, 1.2, 2.4])
     with cols[0]:
         st.markdown("**Question**")
     with cols[1]:
@@ -577,9 +538,7 @@ if st.session_state.finished:
                 st.write(i["tip"])
         st.markdown("<hr style='margin:6px 0;opacity:0.2'>", unsafe_allow_html=True)
 
-    # Restart button
     if st.button("🔄 Take a New Quiz", use_container_width=True):
-        # Reset state
         st.session_state.q10 = []
         st.session_state.idx = 0
         st.session_state.graded = []
@@ -587,7 +546,6 @@ if st.session_state.finished:
         st.session_state.finished = False
         st.session_state.started = False
         st.session_state.run_id += 1
-        # No rerun needed; Streamlit will re-render on next interaction
 
 # Footer
 st.caption("© 2025 PrepMate — Built with Streamlit & OpenAI API")
