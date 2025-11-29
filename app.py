@@ -188,7 +188,7 @@ def badge(label: str, color: str):
     )
 
 
-# Sidebar (hidden after start)
+# Sidebar
 with st.sidebar:
     st.header("⚙️ Settings")
     difficulty = st.select_slider(
@@ -213,7 +213,6 @@ badge(f"Interviewer: {persona}", "#a5b4fc")
 
 # Topic & Optional Context (hidden after start)
 if not st.session_state.started:
-    # Main topic subtitle
     st.markdown("### What do you want to practice?")
     topic = st.text_area(
         "",
@@ -223,7 +222,6 @@ if not st.session_state.started:
         label_visibility="collapsed",
     )
 
-    # Optional inputs are hidden inside a clickable expander
     files = None
     jd_text = ""
     resume_text = ""
@@ -316,6 +314,12 @@ Create EXACTLY 10 interview questions that MIX technical and behavioral angles a
             st.session_state.last_feedback = None
             st.session_state.finished = False
             st.session_state.started = True
+
+            # Immediately rerun so topic/optional inputs disappear
+            try:
+                st.rerun()
+            except Exception:
+                st.experimental_rerun()
 
 
 # One-by-one flow
