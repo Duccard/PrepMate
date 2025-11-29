@@ -26,14 +26,6 @@ https://prepmate-vehotkn5mymmd3kbyrnppd.streamlit.app/
 
 ### Interviewer Personas
 
-<<<<<<< HEAD
-python -m venv .venv
-source .venv/bin/activate    
-.\.venv\Scripts\activate    
-=======
-Choose an interviewer style that shapes the tone of feedback:
->>>>>>> a254778 (Updated comments and READ ME)
-
 - Neutral  
 - Friendly coach  
 - Strict bar-raiser  
@@ -56,14 +48,6 @@ For each answer, PrepMate:
   - Overall  
 - Computes a weighted score:
 
-<<<<<<< HEAD
-## 📋 How it works
-=======
-\[
-\text{weighted} = \frac{\text{Clarity} + \text{Depth} + \text{Structure} + 2 \times \text{Overall}}{5}
-\]
->>>>>>> a254778 (Updated comments and READ ME)
-
 - Determines:
   - A verdict band: very bad, bad, intermediate, good, very good.  
   - A normalized points value in the range 0.0–1.0.  
@@ -74,12 +58,6 @@ For each answer, PrepMate:
 The app also handles “auto-zero” answers (for example, empty or “I don’t know”) by giving a zero score with a generic tip.
 
 ### Final Evaluation
-
-<<<<<<< HEAD
-## 🧩 Tech Stack
-=======
-After all 10 questions are answered, you receive:
->>>>>>> a254778 (Updated comments and READ ME)
 
 - Total points out of 10 (sum of all question points).  
 - Average weighted score out of 5.  
